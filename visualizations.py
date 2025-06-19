@@ -4,6 +4,9 @@ from tqdm import tqdm
 import torch
 from PIL import Image, ImageOps
 import torchvision.transforms as tfm
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+from pathlib import Path
 
 # Height and width of a single image for visualization
 IMG_HW = 512
@@ -170,3 +173,163 @@ def save_preds(predictions, eval_ds, log_dir, save_only_wrong_preds=None, use_la
             use_labels=use_labels,
             confidences=query_confidences if confidences is not None else None
         )
+
+
+def plot_tsne(database_descriptors, queries_descriptors, save_path, perplexity=30, n_iter=1000, random_state=42):
+    """Create a t-SNE visualization of database and query descriptors.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    save_path : Path or str, where to save the plot
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    # Combine all descriptors
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    
+    # Create labels (0 for database, 1 for queries)
+    labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Running t-SNE on {len(all_descriptors)} descriptors...")
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    # Create the plot
+    plt.figure(figsize=(12, 10))
+    
+    # Plot database points
+    db_embeddings = embeddings[labels == 0]
+    plt.scatter(db_embeddings[:, 0], db_embeddings[:, 1], 
+                c='blue', alpha=0.6, s=50, label='Database', edgecolors='none')
+    
+    # Plot query points
+    query_embeddings = embeddings[labels == 1]
+    plt.scatter(query_embeddings[:, 0], query_embeddings[:, 1], 
+                c='red', alpha=0.8, s=100, label='Queries', edgecolors='black', linewidths=1)
+    
+    plt.xlabel('t-SNE Component 1', fontsize=12)
+    plt.ylabel('t-SNE Component 2', fontsize=12)
+    plt.title('t-SNE Visualization of Image Descriptors', fontsize=14)
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Save the plot
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"t-SNE plot saved to {save_path}")
+    
+    # Also save the embeddings for potential further analysis
+    embeddings_path = Path(save_path).parent / "tsne_embeddings.npz"
+    np.savez(embeddings_path, 
+             embeddings=embeddings, 
+             labels=labels,
+             db_embeddings=db_embeddings,
+             query_embeddings=query_embeddings)
+    print(f"t-SNE embeddings saved to {embeddings_path}")
+
+
+def plot_tsne_with_connections(database_descriptors, queries_descriptors, predictions, 
+                               save_path, num_connections=3, perplexity=30, n_iter=1000, 
+                               random_state=42):
+    """Create an enhanced t-SNE visualization showing connections between queries and predictions.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    predictions : np.array of shape [num_queries x num_predictions]
+    save_path : Path or str, where to save the plot
+    num_connections : int, number of top predictions to show connections for
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    # Combine all descriptors
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    
+    # Create labels (0 for database, 1 for queries)
+    labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Running t-SNE on {len(all_descriptors)} descriptors...")
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    # Create the plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
+    
+    # First subplot: Basic scatter plot
+    db_embeddings = embeddings[labels == 0]
+    query_embeddings = embeddings[labels == 1]
+    
+    ax1.scatter(db_embeddings[:, 0], db_embeddings[:, 1], 
+                c='blue', alpha=0.6, s=50, label='Database', edgecolors='none')
+    ax1.scatter(query_embeddings[:, 0], query_embeddings[:, 1], 
+                c='red', alpha=0.8, s=100, label='Queries', edgecolors='black', linewidths=1)
+    
+    ax1.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax1.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax1.set_title('t-SNE Visualization of Image Descriptors', fontsize=14)
+    ax1.legend(fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    
+    # Second subplot: With connections
+    ax2.scatter(db_embeddings[:, 0], db_embeddings[:, 1], 
+                c='blue', alpha=0.3, s=30, label='Database', edgecolors='none')
+    ax2.scatter(query_embeddings[:, 0], query_embeddings[:, 1], 
+                c='red', alpha=0.8, s=100, label='Queries', edgecolors='black', linewidths=1)
+    
+    # Draw connections between queries and their top predictions
+    for query_idx in range(len(queries_descriptors)):
+        query_embedding = query_embeddings[query_idx]
+        
+        # Get top predictions for this query
+        top_preds = predictions[query_idx, :num_connections]
+        
+        for i, pred_idx in enumerate(top_preds):
+            pred_embedding = db_embeddings[pred_idx]
+            
+            # Draw line with decreasing alpha for lower-ranked predictions
+            alpha = 0.6 * (1 - i / num_connections)
+            ax2.plot([query_embedding[0], pred_embedding[0]], 
+                    [query_embedding[1], pred_embedding[1]], 
+                    'gray', alpha=alpha, linewidth=1)
+    
+    ax2.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax2.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax2.set_title(f'Query-Prediction Connections (Top {num_connections})', fontsize=14)
+    ax2.legend(fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    
+    # Save the plot
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Enhanced t-SNE plot saved to {save_path}")
+    
+    # Save embeddings
+    embeddings_path = Path(save_path).parent / "tsne_embeddings_enhanced.npz"
+    np.savez(embeddings_path, 
+             embeddings=embeddings, 
+             labels=labels,
+             db_embeddings=db_embeddings,
+             query_embeddings=query_embeddings,
+             predictions=predictions)
+    print(f"t-SNE embeddings saved to {embeddings_path}")

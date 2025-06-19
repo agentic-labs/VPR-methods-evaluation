@@ -73,6 +73,12 @@ def main(args):
         np.save(log_dir / "queries_descriptors.npy", queries_descriptors)
         np.save(log_dir / "database_descriptors.npy", database_descriptors)
 
+    # Create t-SNE visualization if requested
+    if args.plot_tsne:
+        logger.info("Creating t-SNE visualization of descriptors")
+        tsne_path = log_dir / "tsne_visualization.png"
+        visualizations.plot_tsne(database_descriptors, queries_descriptors, tsne_path)
+
     # Use a kNN to find predictions
     faiss_index = faiss.IndexFlatL2(args.descriptors_dimension)
     faiss_index.add(database_descriptors)
@@ -80,6 +86,18 @@ def main(args):
 
     logger.debug("Calculating recalls")
     distances, predictions = faiss_index.search(queries_descriptors, max(args.recall_values))
+    
+    # Create enhanced t-SNE visualization with connections if requested
+    if args.plot_tsne:
+        logger.info("Creating enhanced t-SNE visualization with query-prediction connections")
+        tsne_enhanced_path = log_dir / "tsne_visualization_enhanced.png"
+        visualizations.plot_tsne_with_connections(
+            database_descriptors=faiss_index.reconstruct_n(0, test_ds.num_database),
+            queries_descriptors=queries_descriptors,
+            predictions=predictions,
+            save_path=tsne_enhanced_path,
+            num_connections=min(5, predictions.shape[1])  # Show top 5 connections
+        )
     
     # Convert L2 distances to confidence scores
     # Lower L2 distance = higher confidence

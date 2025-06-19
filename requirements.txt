@@ -1,6 +1,7 @@
 faiss_cpu
 gdown
 loguru
+matplotlib
 numpy
 Pillow
 scikit_learn
