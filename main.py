@@ -116,6 +116,71 @@ def main(args):
             cluster_dir
         )
 
+    # Perform HDBSCAN clustering if requested
+    hdbscan_cluster_labels_db = None
+    hdbscan_cluster_labels_queries = None
+    if args.perform_hdbscan:
+        logger.info(f"Performing HDBSCAN clustering with min_cluster_size={args.hdbscan_min_cluster_size}, min_samples={args.hdbscan_min_samples}")
+        
+        try:
+            import hdbscan
+        except ImportError:
+            logger.error("HDBSCAN not installed. Please install it with: pip install hdbscan")
+            raise
+        
+        # Combine all descriptors for clustering
+        all_descriptors_for_clustering = np.vstack([database_descriptors, queries_descriptors])
+        
+        # Perform HDBSCAN clustering
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=args.hdbscan_min_cluster_size,
+            min_samples=args.hdbscan_min_samples,
+            metric='euclidean',
+            cluster_selection_method='eom',
+            prediction_data=True
+        )
+        
+        cluster_labels = clusterer.fit_predict(all_descriptors_for_clustering)
+        
+        # Split cluster labels for database and queries
+        hdbscan_cluster_labels_db = cluster_labels[:test_ds.num_database]
+        hdbscan_cluster_labels_queries = cluster_labels[test_ds.num_database:]
+        
+        # Log cluster distribution
+        unique_labels = np.unique(cluster_labels)
+        n_clusters = len(unique_labels[unique_labels != -1])
+        n_noise = np.sum(cluster_labels == -1)
+        
+        logger.info(f"HDBSCAN found {n_clusters} clusters")
+        logger.info(f"Number of noise points: {n_noise} ({n_noise/len(cluster_labels)*100:.1f}%)")
+        logger.info("HDBSCAN cluster distribution:")
+        
+        for cluster_id in unique_labels:
+            db_count = np.sum(hdbscan_cluster_labels_db == cluster_id)
+            query_count = np.sum(hdbscan_cluster_labels_queries == cluster_id)
+            if cluster_id == -1:
+                logger.info(f"  Noise: {db_count} database images, {query_count} query images")
+            else:
+                logger.info(f"  Cluster {cluster_id}: {db_count} database images, {query_count} query images")
+        
+        # Save cluster assignments
+        np.save(log_dir / "hdbscan_cluster_labels_db.npy", hdbscan_cluster_labels_db)
+        np.save(log_dir / "hdbscan_cluster_labels_queries.npy", hdbscan_cluster_labels_queries)
+        
+        # Save cluster probabilities and outlier scores
+        np.save(log_dir / "hdbscan_probabilities.npy", clusterer.probabilities_)
+        np.save(log_dir / "hdbscan_outlier_scores.npy", clusterer.outlier_scores_)
+        
+        # Save images organized by cluster
+        hdbscan_cluster_dir = log_dir / "hdbscan_clusters"
+        visualizations.save_hdbscan_images_by_cluster(
+            test_ds.database_paths,
+            test_ds.queries_paths,
+            hdbscan_cluster_labels_db,
+            hdbscan_cluster_labels_queries,
+            hdbscan_cluster_dir
+        )
+
     # Create t-SNE visualization if requested
     if args.plot_tsne:
         if args.perform_clustering and cluster_labels_db is not None:
@@ -128,6 +193,17 @@ def main(args):
                 cluster_labels_queries,
                 tsne_kmeans_path,
                 args.num_clusters
+            )
+        
+        if args.perform_hdbscan and hdbscan_cluster_labels_db is not None:
+            logger.info("Creating t-SNE visualization with HDBSCAN clustering")
+            tsne_hdbscan_path = log_dir / "tsne_hdbscan_visualization.png"
+            visualizations.plot_tsne_with_hdbscan(
+                database_descriptors, 
+                queries_descriptors, 
+                hdbscan_cluster_labels_db,
+                hdbscan_cluster_labels_queries,
+                tsne_hdbscan_path
             )
         
         # Also create standard t-SNE visualization

@@ -107,6 +107,23 @@ def parse_arguments():
         default=5,
         help="number of clusters for k-means clustering",
     )
+    parser.add_argument(
+        "--perform_hdbscan",
+        action="store_true",
+        help="set to True if you want to perform HDBSCAN clustering on the descriptors",
+    )
+    parser.add_argument(
+        "--hdbscan_min_cluster_size",
+        type=int,
+        default=5,
+        help="minimum cluster size for HDBSCAN clustering",
+    )
+    parser.add_argument(
+        "--hdbscan_min_samples",
+        type=int,
+        default=5,
+        help="minimum samples parameter for HDBSCAN clustering",
+    )
     args = parser.parse_args()
 
     args.use_labels = not args.no_labels
