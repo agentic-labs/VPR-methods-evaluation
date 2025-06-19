@@ -79,7 +79,22 @@ def main(args):
     del database_descriptors, all_descriptors
 
     logger.debug("Calculating recalls")
-    _, predictions = faiss_index.search(queries_descriptors, max(args.recall_values))
+    distances, predictions = faiss_index.search(queries_descriptors, max(args.recall_values))
+    
+    # Convert L2 distances to confidence scores
+    # Lower L2 distance = higher confidence
+    # We'll use exponential decay: confidence = exp(-distance)
+    confidences = np.exp(-distances)
+    
+    # Log confidence scores for top predictions
+    logger.info("Logging confidence scores for top predictions:")
+    for query_idx in range(min(5, len(predictions))):  # Log first 5 queries as examples
+        logger.info(f"Query {query_idx}:")
+        for pred_idx in range(min(5, predictions.shape[1])):  # Top 5 predictions
+            pred_id = predictions[query_idx, pred_idx]
+            confidence = confidences[query_idx, pred_idx]
+            distance = distances[query_idx, pred_idx]
+            logger.info(f"  Prediction {pred_idx}: DB index {pred_id}, L2 distance: {distance:.4f}, Confidence: {confidence:.4f}")
 
     # For each query, check if the predictions are correct
     if args.use_labels:
@@ -101,7 +116,12 @@ def main(args):
         logger.info("Saving final predictions")
         # For each query save num_preds_to_save predictions
         visualizations.save_preds(
-            predictions[:, : args.num_preds_to_save], test_ds, log_dir, args.save_only_wrong_preds, args.use_labels
+            predictions[:, : args.num_preds_to_save], 
+            test_ds, 
+            log_dir, 
+            args.save_only_wrong_preds, 
+            args.use_labels,
+            confidences[:, : args.num_preds_to_save]  # Pass confidence scores
         )
 
 
