@@ -73,9 +73,65 @@ def main(args):
         np.save(log_dir / "queries_descriptors.npy", queries_descriptors)
         np.save(log_dir / "database_descriptors.npy", database_descriptors)
 
+    # Perform k-means clustering if requested
+    cluster_labels_db = None
+    cluster_labels_queries = None
+    if args.perform_clustering:
+        logger.info(f"Performing k-means clustering with {args.num_clusters} clusters")
+        
+        # Combine all descriptors for clustering
+        all_descriptors_for_clustering = np.vstack([database_descriptors, queries_descriptors])
+        
+        # Perform k-means clustering using FAISS
+        kmeans = faiss.Kmeans(args.descriptors_dimension, args.num_clusters, niter=300, verbose=True)
+        kmeans.train(all_descriptors_for_clustering.astype(np.float32))
+        
+        # Get cluster assignments
+        _, cluster_labels = kmeans.index.search(all_descriptors_for_clustering.astype(np.float32), 1)
+        cluster_labels = cluster_labels.flatten()
+        
+        # Split cluster labels for database and queries
+        cluster_labels_db = cluster_labels[:test_ds.num_database]
+        cluster_labels_queries = cluster_labels[test_ds.num_database:]
+        
+        # Log cluster distribution
+        logger.info("Cluster distribution:")
+        for i in range(args.num_clusters):
+            db_count = np.sum(cluster_labels_db == i)
+            query_count = np.sum(cluster_labels_queries == i)
+            logger.info(f"  Cluster {i}: {db_count} database images, {query_count} query images")
+        
+        # Save cluster assignments
+        np.save(log_dir / "cluster_labels_db.npy", cluster_labels_db)
+        np.save(log_dir / "cluster_labels_queries.npy", cluster_labels_queries)
+        
+        # Save images organized by cluster
+        cluster_dir = log_dir / "clusters"
+        visualizations.save_images_by_cluster(
+            test_ds.database_paths,
+            test_ds.queries_paths,
+            cluster_labels_db,
+            cluster_labels_queries,
+            args.num_clusters,
+            cluster_dir
+        )
+
     # Create t-SNE visualization if requested
     if args.plot_tsne:
-        logger.info("Creating t-SNE visualization of descriptors")
+        if args.perform_clustering and cluster_labels_db is not None:
+            logger.info("Creating t-SNE visualization with k-means clustering")
+            tsne_kmeans_path = log_dir / "tsne_kmeans_visualization.png"
+            visualizations.plot_tsne_with_kmeans(
+                database_descriptors, 
+                queries_descriptors, 
+                cluster_labels_db,
+                cluster_labels_queries,
+                tsne_kmeans_path,
+                args.num_clusters
+            )
+        
+        # Also create standard t-SNE visualization
+        logger.info("Creating standard t-SNE visualization of descriptors")
         tsne_path = log_dir / "tsne_visualization.png"
         visualizations.plot_tsne(database_descriptors, queries_descriptors, tsne_path)
 

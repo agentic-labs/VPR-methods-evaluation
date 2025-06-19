@@ -96,6 +96,17 @@ def parse_arguments():
         action="store_true",
         help="set to True if you want to create a t-SNE visualization of the descriptors",
     )
+    parser.add_argument(
+        "--perform_clustering",
+        action="store_true",
+        help="set to True if you want to perform k-means clustering on the descriptors",
+    )
+    parser.add_argument(
+        "--num_clusters",
+        type=int,
+        default=5,
+        help="number of clusters for k-means clustering",
+    )
     args = parser.parse_args()
 
     args.use_labels = not args.no_labels
