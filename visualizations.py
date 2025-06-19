@@ -540,7 +540,8 @@ def create_cluster_visualization(database_paths, queries_paths, db_indices,
         if i < n_db:
             img_path = database_paths[db_sample[i]]
             img = Image.open(img_path).convert('RGB')
-            img_resized = tfm.Resize(256, max_size=256, antialias=True)(img)
+            # Use Resize with only size parameter to avoid the max_size conflict
+            img_resized = tfm.Resize((256, 256), antialias=True)(img)
             axes[0, i].imshow(img_resized)
             axes[0, i].set_title(f'DB {db_sample[i]}', fontsize=8)
         else:
@@ -552,7 +553,8 @@ def create_cluster_visualization(database_paths, queries_paths, db_indices,
         if i < n_query:
             img_path = queries_paths[query_sample[i]]
             img = Image.open(img_path).convert('RGB')
-            img_resized = tfm.Resize(256, max_size=256, antialias=True)(img)
+            # Use Resize with only size parameter to avoid the max_size conflict
+            img_resized = tfm.Resize((256, 256), antialias=True)(img)
             axes[1, i].imshow(img_resized)
             axes[1, i].set_title(f'Query {query_sample[i]}', fontsize=8)
         else:
