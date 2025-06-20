@@ -10,6 +10,9 @@ from loguru import logger
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Subset
 from tqdm import tqdm
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import pdist, squareform
+from sklearn.preprocessing import normalize
 
 import visualizations
 import vpr_models
@@ -181,6 +184,83 @@ def main(args):
             hdbscan_cluster_dir
         )
 
+    # Perform Hierarchical clustering if requested
+    hierarchical_cluster_labels_db = None
+    hierarchical_cluster_labels_queries = None
+    linkage_matrix = None
+    if args.perform_hierarchical:
+        logger.info(f"Performing hierarchical clustering with average linkage and cosine distance")
+        logger.info(f"Distance threshold: {args.hierarchical_distance_threshold}")
+        
+        # Normalize descriptors for cosine distance
+        logger.info("Normalizing descriptors for cosine distance...")
+        database_descriptors_norm = normalize(database_descriptors, norm='l2', axis=1)
+        queries_descriptors_norm = normalize(queries_descriptors, norm='l2', axis=1)
+        
+        # Combine all descriptors for clustering
+        all_descriptors_norm = np.vstack([database_descriptors_norm, queries_descriptors_norm])
+        
+        # Compute pairwise cosine distances (1 - cosine_similarity)
+        logger.info("Computing pairwise cosine distances...")
+        # pdist with 'cosine' metric computes 1 - cosine_similarity
+        distances = pdist(all_descriptors_norm, metric='cosine')
+        
+        # Perform hierarchical clustering with average linkage
+        logger.info("Performing hierarchical clustering...")
+        linkage_matrix = linkage(distances, method='average')
+        
+        # Cut the dendrogram at the specified distance threshold
+        if args.hierarchical_distance_threshold is not None:
+            cluster_labels = fcluster(linkage_matrix, 
+                                    t=args.hierarchical_distance_threshold, 
+                                    criterion='distance') - 1  # Make 0-indexed
+        else:
+            # Use number of clusters if threshold not specified
+            cluster_labels = fcluster(linkage_matrix, 
+                                    t=args.hierarchical_num_clusters, 
+                                    criterion='maxclust') - 1  # Make 0-indexed
+        
+        # Split cluster labels for database and queries
+        hierarchical_cluster_labels_db = cluster_labels[:test_ds.num_database]
+        hierarchical_cluster_labels_queries = cluster_labels[test_ds.num_database:]
+        
+        # Log cluster distribution
+        unique_labels = np.unique(cluster_labels)
+        n_clusters = len(unique_labels)
+        
+        logger.info(f"Hierarchical clustering found {n_clusters} clusters")
+        logger.info("Hierarchical cluster distribution:")
+        
+        for cluster_id in unique_labels:
+            db_count = np.sum(hierarchical_cluster_labels_db == cluster_id)
+            query_count = np.sum(hierarchical_cluster_labels_queries == cluster_id)
+            logger.info(f"  Cluster {cluster_id}: {db_count} database images, {query_count} query images")
+        
+        # Save cluster assignments
+        np.save(log_dir / "hierarchical_cluster_labels_db.npy", hierarchical_cluster_labels_db)
+        np.save(log_dir / "hierarchical_cluster_labels_queries.npy", hierarchical_cluster_labels_queries)
+        np.save(log_dir / "hierarchical_linkage_matrix.npy", linkage_matrix)
+        
+        # Save dendrogram visualization
+        dendrogram_path = log_dir / "hierarchical_dendrogram.png"
+        visualizations.plot_hierarchical_dendrogram(
+            linkage_matrix, 
+            dendrogram_path,
+            distance_threshold=args.hierarchical_distance_threshold,
+            title_suffix=" - Average Linkage with Cosine Distance"
+        )
+        
+        # Save images organized by cluster
+        hierarchical_cluster_dir = log_dir / "hierarchical_clusters"
+        visualizations.save_hierarchical_images_by_cluster(
+            test_ds.database_paths,
+            test_ds.queries_paths,
+            hierarchical_cluster_labels_db,
+            hierarchical_cluster_labels_queries,
+            hierarchical_cluster_dir,
+            distance_threshold=args.hierarchical_distance_threshold
+        )
+
     # Create t-SNE visualization if requested
     if args.plot_tsne:
         if args.perform_clustering and cluster_labels_db is not None:
@@ -204,6 +284,19 @@ def main(args):
                 hdbscan_cluster_labels_db,
                 hdbscan_cluster_labels_queries,
                 tsne_hdbscan_path
+            )
+        
+        if args.perform_hierarchical and hierarchical_cluster_labels_db is not None:
+            logger.info("Creating t-SNE visualization with Hierarchical clustering")
+            tsne_hierarchical_path = log_dir / "tsne_hierarchical_visualization.png"
+            visualizations.plot_tsne_with_hierarchical(
+                database_descriptors, 
+                queries_descriptors, 
+                hierarchical_cluster_labels_db,
+                hierarchical_cluster_labels_queries,
+                tsne_hierarchical_path,
+                linkage_matrix=linkage_matrix,
+                distance_threshold=args.hierarchical_distance_threshold
             )
         
         # Also create standard t-SNE visualization

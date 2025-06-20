@@ -124,6 +124,36 @@ def parse_arguments():
         default=5,
         help="minimum samples parameter for HDBSCAN clustering",
     )
+    parser.add_argument(
+        "--hdbscan_cluster_selection_method",
+        type=str,
+        default="eom",
+        choices=["eom", "leaf"],
+        help="cluster selection method for HDBSCAN: 'eom' (default) tends to find larger clusters, 'leaf' finds smaller, more homogeneous clusters",
+    )
+    parser.add_argument(
+        "--hdbscan_cluster_selection_epsilon",
+        type=float,
+        default=0.0,
+        help="cut distance for extracting flat clusters. A distance threshold below which clusters will not be split. Smaller values create more clusters.",
+    )
+    parser.add_argument(
+        "--perform_hierarchical",
+        action="store_true",
+        help="set to True if you want to perform hierarchical clustering with average linkage and cosine distance",
+    )
+    parser.add_argument(
+        "--hierarchical_num_clusters",
+        type=int,
+        default=None,
+        help="number of clusters to extract from hierarchical clustering (only used if distance_threshold is not set)",
+    )
+    parser.add_argument(
+        "--hierarchical_distance_threshold",
+        type=float,
+        default=0.5,
+        help="distance threshold for hierarchical clustering (default: 0.5 for cosine distance)",
+    )
     args = parser.parse_args()
 
     args.use_labels = not args.no_labels

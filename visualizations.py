@@ -9,6 +9,8 @@ from sklearn.manifold import TSNE
 from pathlib import Path
 import faiss
 import matplotlib.cm as cm
+from scipy.cluster.hierarchy import dendrogram
+from scipy.spatial.distance import squareform
 
 # Height and width of a single image for visualization
 IMG_HW = 512
@@ -780,4 +782,254 @@ def save_hdbscan_images_by_cluster(database_paths, queries_paths, cluster_labels
         f.write('\n'.join(summary_lines))
     
     print(f"Images organized by HDBSCAN clusters saved to {output_dir}")
+    print(f"Cluster summary saved to {summary_file}")
+
+
+def plot_hierarchical_dendrogram(linkage_matrix, save_path, distance_threshold=0.5, 
+                                 labels=None, title_suffix=""):
+    """Create a dendrogram visualization for hierarchical clustering.
+    
+    Parameters
+    ----------
+    linkage_matrix : np.array, linkage matrix from scipy hierarchical clustering
+    save_path : Path or str, where to save the plot
+    distance_threshold : float, distance threshold for cutting the dendrogram
+    labels : list, optional labels for leaves
+    title_suffix : str, additional text for the title
+    """
+    plt.figure(figsize=(20, 10))
+    
+    # Create dendrogram
+    dendrogram_result = dendrogram(
+        linkage_matrix,
+        labels=labels,
+        color_threshold=distance_threshold,
+        above_threshold_color='gray',
+        leaf_rotation=90,
+        leaf_font_size=8
+    )
+    
+    # Add threshold line
+    plt.axhline(y=distance_threshold, c='red', linestyle='--', 
+                label=f'Distance threshold = {distance_threshold}')
+    
+    plt.xlabel('Sample Index', fontsize=12)
+    plt.ylabel('Cosine Distance', fontsize=12)
+    plt.title(f'Hierarchical Clustering Dendrogram{title_suffix}', fontsize=14)
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Dendrogram saved to {save_path}")
+    return dendrogram_result
+
+
+def plot_tsne_with_hierarchical(database_descriptors, queries_descriptors, 
+                                cluster_labels_db, cluster_labels_queries, 
+                                save_path, linkage_matrix=None, distance_threshold=0.5,
+                                perplexity=30, n_iter=1000, random_state=42):
+    """Create a t-SNE visualization with hierarchical clustering results.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    cluster_labels_db : np.array of shape [num_database], cluster assignments for database
+    cluster_labels_queries : np.array of shape [num_queries], cluster assignments for queries
+    save_path : Path or str, where to save the plot
+    linkage_matrix : np.array, optional linkage matrix for showing dendrogram
+    distance_threshold : float, distance threshold used for clustering
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    # Combine all descriptors
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    
+    # Combine cluster labels
+    all_cluster_labels = np.concatenate([cluster_labels_db, cluster_labels_queries])
+    
+    # Create labels (0 for database, 1 for queries)
+    data_type_labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Running t-SNE on {len(all_descriptors)} descriptors...")
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    # Determine number of clusters
+    unique_clusters = np.unique(all_cluster_labels)
+    n_clusters = len(unique_clusters)
+    
+    # Create figure with subplots
+    if linkage_matrix is not None:
+        fig = plt.figure(figsize=(36, 10))
+        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1.5])
+        ax1 = fig.add_subplot(gs[0])
+        ax2 = fig.add_subplot(gs[1])
+        ax3 = fig.add_subplot(gs[2])
+    else:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
+    
+    # Get colors for clusters
+    if n_clusters <= 20:
+        colors = cm.tab20(np.linspace(0, 1, n_clusters))
+    else:
+        colors = cm.gist_rainbow(np.linspace(0, 1, n_clusters))
+    
+    # First subplot: Color by cluster
+    for i, cluster_id in enumerate(unique_clusters):
+        # Database points in this cluster
+        mask_db = (data_type_labels == 0) & (all_cluster_labels == cluster_id)
+        if np.any(mask_db):
+            ax1.scatter(embeddings[mask_db, 0], embeddings[mask_db, 1], 
+                       c=[colors[i]], alpha=0.6, s=50, 
+                       label=f'DB Cluster {cluster_id}', edgecolors='none')
+        
+        # Query points in this cluster
+        mask_query = (data_type_labels == 1) & (all_cluster_labels == cluster_id)
+        if np.any(mask_query):
+            ax1.scatter(embeddings[mask_query, 0], embeddings[mask_query, 1], 
+                       c=[colors[i]], alpha=0.8, s=100, 
+                       marker='^', label=f'Query Cluster {cluster_id}', 
+                       edgecolors='black', linewidths=1)
+    
+    ax1.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax1.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax1.set_title(f't-SNE with Hierarchical Clustering\n(threshold={distance_threshold}, {n_clusters} clusters)', 
+                  fontsize=14)
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax1.grid(True, alpha=0.3)
+    
+    # Second subplot: Show cluster distribution
+    cluster_counts_db = np.bincount(cluster_labels_db, minlength=n_clusters)
+    cluster_counts_queries = np.bincount(cluster_labels_queries, minlength=n_clusters)
+    
+    x = np.arange(n_clusters)
+    width = 0.35
+    
+    ax2.bar(x - width/2, cluster_counts_db, width, label='Database', alpha=0.7)
+    ax2.bar(x + width/2, cluster_counts_queries, width, label='Queries', alpha=0.7)
+    
+    ax2.set_xlabel('Cluster ID', fontsize=12)
+    ax2.set_ylabel('Number of Images', fontsize=12)
+    ax2.set_title('Distribution of Images across Clusters', fontsize=14)
+    ax2.set_xticks(x)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # Third subplot: Mini dendrogram if linkage matrix provided
+    if linkage_matrix is not None:
+        dendrogram(
+            linkage_matrix,
+            ax=ax3,
+            color_threshold=distance_threshold,
+            above_threshold_color='gray',
+            no_labels=True
+        )
+        ax3.axhline(y=distance_threshold, c='red', linestyle='--', 
+                    label=f'Threshold = {distance_threshold}')
+        ax3.set_xlabel('Sample Index', fontsize=10)
+        ax3.set_ylabel('Cosine Distance', fontsize=10)
+        ax3.set_title('Hierarchical Clustering Dendrogram', fontsize=12)
+        ax3.legend(fontsize=10)
+        ax3.grid(True, alpha=0.3, axis='y')
+    
+    # Save the plot
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"t-SNE with hierarchical clustering plot saved to {save_path}")
+    
+    # Save embeddings and cluster assignments
+    embeddings_path = Path(save_path).parent / "tsne_hierarchical_embeddings.npz"
+    np.savez(embeddings_path, 
+             embeddings=embeddings, 
+             data_type_labels=data_type_labels,
+             cluster_labels=all_cluster_labels,
+             cluster_labels_db=cluster_labels_db,
+             cluster_labels_queries=cluster_labels_queries)
+    print(f"t-SNE embeddings and cluster labels saved to {embeddings_path}")
+
+
+def save_hierarchical_images_by_cluster(database_paths, queries_paths, cluster_labels_db, 
+                                        cluster_labels_queries, output_dir, 
+                                        distance_threshold=0.5):
+    """Save images organized by their hierarchical cluster assignments.
+    
+    Parameters
+    ----------
+    database_paths : list of paths to database images
+    queries_paths : list of paths to query images
+    cluster_labels_db : np.array of cluster assignments for database images
+    cluster_labels_queries : np.array of cluster assignments for query images
+    output_dir : Path, directory to save the cluster directories
+    distance_threshold : float, distance threshold used for clustering
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    # Get unique cluster IDs
+    unique_clusters = np.unique(np.concatenate([cluster_labels_db, cluster_labels_queries]))
+    n_clusters = len(unique_clusters)
+    
+    # Create a summary file
+    summary_file = output_dir / "hierarchical_cluster_summary.txt"
+    summary_lines = [
+        f"Hierarchical Clustering Results",
+        f"Distance threshold: {distance_threshold}",
+        f"Number of clusters: {n_clusters}",
+        f"Clustering method: Average Linkage with Cosine Distance",
+        "",
+    ]
+    
+    for cluster_id in unique_clusters:
+        cluster_dir = output_dir / f"cluster_{cluster_id:02d}"
+        cluster_dir.mkdir(exist_ok=True)
+        
+        # Create subdirectories for database and queries
+        db_dir = cluster_dir / "database"
+        query_dir = cluster_dir / "queries"
+        db_dir.mkdir(exist_ok=True)
+        query_dir.mkdir(exist_ok=True)
+        
+        # Get indices for this cluster
+        db_indices = np.where(cluster_labels_db == cluster_id)[0]
+        query_indices = np.where(cluster_labels_queries == cluster_id)[0]
+        
+        summary_lines.append(f"Cluster {cluster_id}:")
+        summary_lines.append(f"  Database images: {len(db_indices)}")
+        summary_lines.append(f"  Query images: {len(query_indices)}")
+        summary_lines.append("")
+        
+        # Save database image paths
+        db_paths_file = cluster_dir / "database_paths.txt"
+        with open(db_paths_file, 'w') as f:
+            for idx in db_indices:
+                f.write(f"{database_paths[idx]}\n")
+        
+        # Save query image paths
+        query_paths_file = cluster_dir / "query_paths.txt"
+        with open(query_paths_file, 'w') as f:
+            for idx in query_indices:
+                f.write(f"{queries_paths[idx]}\n")
+        
+        # Create visualization of sample images from this cluster
+        create_cluster_visualization(database_paths, queries_paths, db_indices, 
+                                   query_indices, cluster_id, cluster_dir)
+    
+    # Write summary file
+    with open(summary_file, 'w') as f:
+        f.write('\n'.join(summary_lines))
+    
+    print(f"Images organized by hierarchical clusters saved to {output_dir}")
     print(f"Cluster summary saved to {summary_file}")
