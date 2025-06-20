@@ -11,6 +11,8 @@ import faiss
 import matplotlib.cm as cm
 from scipy.cluster.hierarchy import dendrogram
 from scipy.spatial.distance import squareform
+import networkx as nx
+from collections import defaultdict
 
 # Height and width of a single image for visualization
 IMG_HW = 512
@@ -1157,3 +1159,288 @@ def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors,
              nearest_neighbors=nearest_neighbors,
              distances=distances[:, 1:n_neighbors+1])  # Save distances to nearest neighbors
     print(f"t-SNE embeddings and NN info saved to {embeddings_path}")
+
+
+def create_nn_graph_and_visualize_components(database_descriptors, queries_descriptors, 
+                                            database_paths, queries_paths, output_dir,
+                                            n_neighbors=1, perplexity=30, n_iter=1000, 
+                                            random_state=42):
+    """Create a nearest neighbor graph and visualize photos in each connected component.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    database_paths : list of paths to database images
+    queries_paths : list of paths to query images
+    output_dir : Path, directory to save the component visualizations
+    n_neighbors : int, number of nearest neighbors to connect (default=1 for single NN)
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    # Combine all descriptors and paths
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    all_paths = database_paths + queries_paths
+    num_database = len(database_descriptors)
+    
+    # Create labels (0 for database, 1 for queries)
+    data_type_labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Building nearest neighbor index for {len(all_descriptors)} descriptors...")
+    
+    # Build FAISS index for efficient NN search
+    dimension = all_descriptors.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(all_descriptors.astype(np.float32))
+    
+    # Find k+1 nearest neighbors (including self)
+    distances, neighbors = index.search(all_descriptors.astype(np.float32), n_neighbors + 1)
+    
+    # Create graph
+    G = nx.Graph()
+    
+    # Add nodes
+    for i in range(len(all_descriptors)):
+        node_type = 'database' if i < num_database else 'query'
+        G.add_node(i, type=node_type, path=all_paths[i])
+    
+    # Add edges (skip self-connections)
+    edge_count = 0
+    for i in range(len(all_descriptors)):
+        for j in range(1, n_neighbors + 1):  # Skip j=0 which is self
+            neighbor_idx = neighbors[i, j]
+            if i != neighbor_idx:  # Double check no self-loops
+                G.add_edge(i, neighbor_idx, weight=float(distances[i, j]))
+                edge_count += 1
+    
+    print(f"Created graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+    
+    # Find connected components
+    components = list(nx.connected_components(G))
+    components.sort(key=len, reverse=True)  # Sort by size, largest first
+    
+    print(f"Found {len(components)} connected components")
+    print(f"Component sizes: {[len(c) for c in components[:10]]}...")  # Show first 10
+    
+    # Create summary file
+    summary_file = output_dir / "connected_components_summary.txt"
+    summary_lines = []
+    summary_lines.append(f"Total nodes: {G.number_of_nodes()}")
+    summary_lines.append(f"Total edges: {G.number_of_edges()}")
+    summary_lines.append(f"Number of connected components: {len(components)}")
+    summary_lines.append(f"Nearest neighbors used: {n_neighbors}")
+    summary_lines.append("")
+    
+    # Analyze and visualize each component
+    for comp_idx, component in enumerate(components):
+        component_nodes = list(component)
+        comp_size = len(component_nodes)
+        
+        # Count database vs query nodes
+        db_count = sum(1 for node in component_nodes if G.nodes[node]['type'] == 'database')
+        query_count = comp_size - db_count
+        
+        summary_lines.append(f"Component {comp_idx} (size={comp_size}):")
+        summary_lines.append(f"  Database images: {db_count}")
+        summary_lines.append(f"  Query images: {query_count}")
+        
+        # Create directory for this component
+        comp_dir = output_dir / f"component_{comp_idx:03d}_size_{comp_size}"
+        comp_dir.mkdir(exist_ok=True)
+        
+        # Save paths for images in this component
+        db_paths_in_comp = []
+        query_paths_in_comp = []
+        
+        for node in component_nodes:
+            if G.nodes[node]['type'] == 'database':
+                db_paths_in_comp.append(G.nodes[node]['path'])
+            else:
+                query_paths_in_comp.append(G.nodes[node]['path'])
+        
+        # Save database paths
+        if db_paths_in_comp:
+            with open(comp_dir / "database_paths.txt", 'w') as f:
+                for path in db_paths_in_comp:
+                    f.write(f"{path}\n")
+        
+        # Save query paths
+        if query_paths_in_comp:
+            with open(comp_dir / "query_paths.txt", 'w') as f:
+                for path in query_paths_in_comp:
+                    f.write(f"{path}\n")
+        
+        # Create visualization for small components
+        if comp_size <= 20:  # Visualize components with 20 or fewer images
+            create_component_visualization(db_paths_in_comp, query_paths_in_comp, 
+                                         comp_idx, comp_size, comp_dir)
+        
+        summary_lines.append("")
+    
+    # Write summary file
+    with open(summary_file, 'w') as f:
+        f.write('\n'.join(summary_lines))
+    
+    # Create t-SNE visualization with component coloring
+    print("Creating t-SNE visualization with connected components...")
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    # Create component labels
+    component_labels = np.zeros(len(all_descriptors), dtype=int)
+    for comp_idx, component in enumerate(components):
+        for node in component:
+            component_labels[node] = comp_idx
+    
+    # Create visualization
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
+    
+    # First subplot: Color by component (show only largest components)
+    num_components_to_show = min(20, len(components))
+    colors = cm.tab20(np.linspace(0, 1, num_components_to_show))
+    
+    for comp_idx in range(num_components_to_show):
+        mask = component_labels == comp_idx
+        comp_embeddings = embeddings[mask]
+        comp_types = data_type_labels[mask]
+        
+        # Plot database points
+        db_mask = comp_types == 0
+        if np.any(db_mask):
+            ax1.scatter(comp_embeddings[db_mask, 0], comp_embeddings[db_mask, 1],
+                       c=[colors[comp_idx]], s=50, alpha=0.6,
+                       label=f'Comp {comp_idx} (DB)', edgecolors='none')
+        
+        # Plot query points
+        query_mask = comp_types == 1
+        if np.any(query_mask):
+            ax1.scatter(comp_embeddings[query_mask, 0], comp_embeddings[query_mask, 1],
+                       c=[colors[comp_idx]], s=100, alpha=0.8, marker='^',
+                       label=f'Comp {comp_idx} (Q)', edgecolors='black', linewidths=1)
+    
+    # Plot remaining components in gray
+    if len(components) > num_components_to_show:
+        mask = component_labels >= num_components_to_show
+        if np.any(mask):
+            ax1.scatter(embeddings[mask, 0], embeddings[mask, 1],
+                       c='gray', s=30, alpha=0.3, label='Other components')
+    
+    ax1.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax1.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax1.set_title(f'Connected Components (Top {num_components_to_show})', fontsize=14)
+    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+    ax1.grid(True, alpha=0.3)
+    
+    # Second subplot: Show component size distribution
+    component_sizes = [len(c) for c in components]
+    ax2.hist(component_sizes, bins=50, alpha=0.7, edgecolor='black')
+    ax2.set_xlabel('Component Size', fontsize=12)
+    ax2.set_ylabel('Number of Components', fontsize=12)
+    ax2.set_title('Distribution of Connected Component Sizes', fontsize=14)
+    ax2.grid(True, alpha=0.3, axis='y')
+    ax2.set_yscale('log')  # Log scale for better visibility
+    
+    # Add text with statistics
+    ax2.text(0.95, 0.95, f'Total components: {len(components)}\nLargest: {max(component_sizes)}\nSingletons: {sum(1 for s in component_sizes if s == 1)}',
+             transform=ax2.transAxes, fontsize=10, verticalalignment='top',
+             horizontalalignment='right', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / "connected_components_visualization.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Connected components visualization saved to {output_dir}")
+    
+    # Save graph structure
+    nx.write_gexf(G, output_dir / "nearest_neighbor_graph.gexf")
+    print(f"Graph structure saved to {output_dir / 'nearest_neighbor_graph.gexf'}")
+    
+    return G, components
+
+
+def create_component_visualization(db_paths, query_paths, comp_idx, comp_size, output_dir):
+    """Create a visualization grid for a single connected component."""
+    from PIL import Image, ImageDraw, ImageFont
+    import math
+    
+    all_paths = db_paths + query_paths
+    if not all_paths:
+        return
+    
+    # Calculate grid dimensions
+    n_images = len(all_paths)
+    grid_cols = min(5, n_images)  # Max 5 columns
+    grid_rows = math.ceil(n_images / grid_cols)
+    
+    # Image dimensions
+    img_size = 200
+    padding = 10
+    
+    # Create canvas
+    canvas_width = grid_cols * img_size + (grid_cols + 1) * padding
+    canvas_height = grid_rows * img_size + (grid_rows + 1) * padding + 50  # Extra space for title
+    
+    canvas = Image.new('RGB', (canvas_width, canvas_height), 'white')
+    draw = ImageDraw.Draw(canvas)
+    
+    # Add title
+    title = f"Component {comp_idx} - Size: {comp_size} (DB: {len(db_paths)}, Q: {len(query_paths)})"
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+    except:
+        font = None
+    
+    text_bbox = draw.textbbox((0, 0), title, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    draw.text(((canvas_width - text_width) // 2, 10), title, fill='black', font=font)
+    
+    # Place images
+    for idx, path in enumerate(all_paths):
+        row = idx // grid_cols
+        col = idx % grid_cols
+        
+        x = col * img_size + (col + 1) * padding
+        y = row * img_size + (row + 1) * padding + 50
+        
+        try:
+            img = Image.open(path).convert('RGB')
+            img.thumbnail((img_size, img_size), Image.Resampling.LANCZOS)
+            
+            # Add border color based on type
+            is_query = path in query_paths
+            border_color = (255, 0, 0) if is_query else (0, 0, 255)  # Red for query, blue for database
+            
+            # Create bordered image
+            bordered = Image.new('RGB', (img_size, img_size), border_color)
+            img_x = (img_size - img.width) // 2
+            img_y = (img_size - img.height) // 2
+            bordered.paste(img, (img_x, img_y))
+            
+            # Draw border
+            draw_border = ImageDraw.Draw(bordered)
+            draw_border.rectangle([0, 0, img_size-1, img_size-1], outline=border_color, width=3)
+            
+            canvas.paste(bordered, (x, y))
+            
+            # Add label
+            label = "Q" if is_query else "DB"
+            draw.text((x + 5, y + 5), label, fill='white', font=font)
+            
+        except Exception as e:
+            print(f"Error loading image {path}: {e}")
+            # Draw placeholder
+            draw.rectangle([x, y, x + img_size, y + img_size], fill='lightgray')
+            draw.text((x + img_size//2 - 20, y + img_size//2), "Error", fill='red')
+    
+    # Save visualization
+    canvas.save(output_dir / f"component_{comp_idx:03d}_visualization.jpg", quality=85)

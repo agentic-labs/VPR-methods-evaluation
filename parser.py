@@ -154,6 +154,17 @@ def parse_arguments():
         default=0.5,
         help="distance threshold for hierarchical clustering (default: 0.5 for cosine distance)",
     )
+    parser.add_argument(
+        "--visualize_connected_components",
+        action="store_true",
+        help="set to True if you want to create a nearest neighbor graph and visualize connected components",
+    )
+    parser.add_argument(
+        "--nn_graph_neighbors",
+        type=int,
+        default=1,
+        help="number of nearest neighbors to connect in the graph (default: 1 for single nearest neighbor)",
+    )
     args = parser.parse_args()
 
     args.use_labels = not args.no_labels

@@ -311,6 +311,20 @@ def main(args):
             database_descriptors, queries_descriptors, tsne_nn_path, n_neighbors=2
         )
 
+    # Create connected components visualization if requested
+    if args.visualize_connected_components:
+        logger.info(f"Creating nearest neighbor graph with {args.nn_graph_neighbors} neighbors and visualizing connected components")
+        cc_dir = log_dir / "connected_components"
+        graph, components = visualizations.create_nn_graph_and_visualize_components(
+            database_descriptors=database_descriptors if 'database_descriptors' in locals() else faiss_index.reconstruct_n(0, test_ds.num_database),
+            queries_descriptors=queries_descriptors,
+            database_paths=test_ds.database_paths,
+            queries_paths=test_ds.queries_paths,
+            output_dir=cc_dir,
+            n_neighbors=args.nn_graph_neighbors
+        )
+        logger.info(f"Connected components visualization saved in {cc_dir}")
+
     # Use a kNN to find predictions
     faiss_index = faiss.IndexFlatL2(args.descriptors_dimension)
     faiss_index.add(database_descriptors)
