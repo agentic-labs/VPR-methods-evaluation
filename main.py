@@ -303,6 +303,11 @@ def main(args):
         logger.info("Creating standard t-SNE visualization of descriptors")
         tsne_path = log_dir / "tsne_visualization.png"
         visualizations.plot_tsne(database_descriptors, queries_descriptors, tsne_path)
+        
+        # Create t-SNE visualization with all nearest neighbor connections
+        logger.info("Creating t-SNE visualization with nearest neighbor connections for all points")
+        tsne_nn_path = log_dir / "tsne_all_nn_connections.png"
+        visualizations.plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors, tsne_nn_path)
 
     # Use a kNN to find predictions
     faiss_index = faiss.IndexFlatL2(args.descriptors_dimension)

@@ -1033,3 +1033,122 @@ def save_hierarchical_images_by_cluster(database_paths, queries_paths, cluster_l
     
     print(f"Images organized by hierarchical clusters saved to {output_dir}")
     print(f"Cluster summary saved to {summary_file}")
+
+
+def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors, save_path, 
+                                      perplexity=30, n_iter=1000, random_state=42):
+    """Create a t-SNE visualization showing nearest neighbor connections for all points.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    save_path : Path or str, where to save the plot
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    # Combine all descriptors
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    
+    # Create labels (0 for database, 1 for queries)
+    labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Running t-SNE on {len(all_descriptors)} descriptors...")
+    
+    # Run t-SNE
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    print("Finding nearest neighbors in descriptor space...")
+    
+    # Find nearest neighbors in the original descriptor space
+    # Using FAISS for efficient nearest neighbor search
+    faiss_index = faiss.IndexFlatL2(all_descriptors.shape[1])
+    faiss_index.add(all_descriptors.astype(np.float32))
+    
+    # Search for 2 nearest neighbors (first one is the point itself)
+    distances, neighbors = faiss_index.search(all_descriptors.astype(np.float32), 2)
+    nearest_neighbors = neighbors[:, 1]  # Get the second column (first actual neighbor)
+    
+    # Create the plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
+    
+    # First subplot: Basic scatter plot
+    db_embeddings = embeddings[labels == 0]
+    query_embeddings = embeddings[labels == 1]
+    
+    ax1.scatter(db_embeddings[:, 0], db_embeddings[:, 1], 
+                c='blue', alpha=0.6, s=50, label='Database', edgecolors='none')
+    ax1.scatter(query_embeddings[:, 0], query_embeddings[:, 1], 
+                c='red', alpha=0.8, s=100, label='Queries', edgecolors='black', linewidths=1)
+    
+    ax1.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax1.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax1.set_title('t-SNE Visualization of Image Descriptors', fontsize=14)
+    ax1.legend(fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    
+    # Second subplot: With nearest neighbor connections
+    ax2.scatter(db_embeddings[:, 0], db_embeddings[:, 1], 
+                c='blue', alpha=0.4, s=30, label='Database', edgecolors='none')
+    ax2.scatter(query_embeddings[:, 0], query_embeddings[:, 1], 
+                c='red', alpha=0.6, s=80, label='Queries', edgecolors='black', linewidths=1)
+    
+    # Draw connections to nearest neighbors
+    print("Drawing nearest neighbor connections...")
+    for i in range(len(embeddings)):
+        nn_idx = nearest_neighbors[i]
+        
+        # Determine color based on point types
+        if labels[i] == 0 and labels[nn_idx] == 0:  # DB to DB
+            color = 'blue'
+            alpha = 0.2
+        elif labels[i] == 1 and labels[nn_idx] == 1:  # Query to Query
+            color = 'red'
+            alpha = 0.3
+        else:  # Cross-type connection (DB to Query or Query to DB)
+            color = 'green'
+            alpha = 0.4
+        
+        ax2.plot([embeddings[i, 0], embeddings[nn_idx, 0]], 
+                [embeddings[i, 1], embeddings[nn_idx, 1]], 
+                color=color, alpha=alpha, linewidth=0.5)
+    
+    ax2.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax2.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax2.set_title('t-SNE with Nearest Neighbor Connections', fontsize=14)
+    ax2.legend(fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    
+    # Add a custom legend for connection types
+    from matplotlib.lines import Line2D
+    custom_lines = [
+        Line2D([0], [0], color='blue', alpha=0.5, lw=2),
+        Line2D([0], [0], color='red', alpha=0.5, lw=2),
+        Line2D([0], [0], color='green', alpha=0.5, lw=2)
+    ]
+    ax2.legend(custom_lines, ['DB→DB', 'Query→Query', 'Cross-type'], 
+               loc='upper right', fontsize=10, title='Connection Types')
+    
+    # Save the plot
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"t-SNE with all nearest neighbor connections saved to {save_path}")
+    
+    # Save embeddings and nearest neighbor information
+    embeddings_path = Path(save_path).parent / "tsne_nn_embeddings.npz"
+    np.savez(embeddings_path, 
+             embeddings=embeddings, 
+             labels=labels,
+             db_embeddings=db_embeddings,
+             query_embeddings=query_embeddings,
+             nearest_neighbors=nearest_neighbors,
+             distances=distances[:, 1])  # Save distances to nearest neighbors
+    print(f"t-SNE embeddings and NN info saved to {embeddings_path}")
