@@ -1369,6 +1369,389 @@ def create_nn_graph_and_visualize_components(database_descriptors, queries_descr
     return G, components
 
 
+def create_nn_graph_with_leiden(database_descriptors, queries_descriptors, 
+                               database_paths, queries_paths, output_dir,
+                               n_neighbors=2, resolution=1.0, n_iterations=2,
+                               perplexity=30, n_iter=1000, random_state=42):
+    """Create a nearest neighbor graph and detect communities using hierarchical Leiden algorithm.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    database_paths : list of paths to database images
+    queries_paths : list of paths to query images
+    output_dir : Path, directory to save the community visualizations
+    n_neighbors : int, number of nearest neighbors to connect (default=2)
+    resolution : float, resolution parameter for Leiden (higher = smaller communities)
+    n_iterations : int, number of iterations for Leiden algorithm
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    try:
+        import leidenalg
+        import igraph as ig
+    except ImportError:
+        print("Installing python-igraph and leidenalg for Leiden community detection...")
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "python-igraph", "leidenalg"])
+        import leidenalg
+        import igraph as ig
+    
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    # Combine all descriptors and paths
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    all_paths = database_paths + queries_paths
+    num_database = len(database_descriptors)
+    
+    # Create labels (0 for database, 1 for queries)
+    data_type_labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Building nearest neighbor index for {len(all_descriptors)} descriptors...")
+    
+    # Build FAISS index for efficient NN search
+    dimension = all_descriptors.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(all_descriptors.astype(np.float32))
+    
+    # Find k+1 nearest neighbors (including self)
+    distances, neighbors = index.search(all_descriptors.astype(np.float32), n_neighbors + 1)
+    
+    # Create igraph Graph
+    edges = []
+    weights = []
+    
+    for i in range(len(all_descriptors)):
+        for j in range(1, n_neighbors + 1):  # Skip j=0 which is self
+            neighbor_idx = neighbors[i, j]
+            if i != neighbor_idx:
+                # Use inverse distance as weight (similarity)
+                weight = 1.0 / (distances[i, j] + 1e-6)
+                edges.append((i, neighbor_idx))
+                weights.append(weight)
+    
+    # Create igraph
+    g = ig.Graph(n=len(all_descriptors))
+    g.add_edges(edges)
+    g.es['weight'] = weights
+    
+    # Add node attributes
+    g.vs['type'] = ['database' if i < num_database else 'query' for i in range(len(all_descriptors))]
+    g.vs['path'] = all_paths
+    
+    print(f"Created graph with {g.vcount()} nodes and {g.ecount()} edges")
+    
+    # Create summary file
+    summary_file = output_dir / "leiden_communities_summary.txt"
+    summary_lines = []
+    summary_lines.append(f"Total nodes: {g.vcount()}")
+    summary_lines.append(f"Total edges: {g.ecount()}")
+    summary_lines.append(f"Nearest neighbors used: {n_neighbors}")
+    summary_lines.append(f"Resolution parameter: {resolution}")
+    summary_lines.append("")
+    
+    # Run t-SNE once for all visualizations
+    print("Computing t-SNE embedding...")
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    # Perform hierarchical Leiden clustering with different resolutions
+    print("Performing hierarchical Leiden community detection...")
+    
+    resolutions = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]  # Different resolution levels
+    level_data = []
+    
+    for level, res in enumerate(resolutions):
+        print(f"\nAnalyzing resolution {res}...")
+        
+        # Run Leiden algorithm
+        partition = leidenalg.find_partition(g, leidenalg.RBConfigurationVertexPartition, 
+                                           weights='weight', resolution_parameter=res,
+                                           n_iterations=n_iterations, seed=random_state)
+        
+        # Get community assignments
+        community_labels = np.array(partition.membership)
+        n_communities = len(set(community_labels))
+        
+        # Calculate modularity
+        modularity = partition.modularity
+        
+        summary_lines.append(f"Resolution {res}:")
+        summary_lines.append(f"  Number of communities: {n_communities}")
+        summary_lines.append(f"  Modularity: {modularity:.4f}")
+        
+        # Create level directory
+        level_dir = output_dir / f"resolution_{res:.1f}_communities_{n_communities}"
+        level_dir.mkdir(exist_ok=True)
+        
+        # Analyze each community
+        community_info = []
+        for comm_id in range(n_communities):
+            nodes_in_comm = np.where(community_labels == comm_id)[0]
+            db_count = sum(1 for node in nodes_in_comm if g.vs[node]['type'] == 'database')
+            query_count = len(nodes_in_comm) - db_count
+            
+            community_info.append({
+                'id': comm_id,
+                'size': len(nodes_in_comm),
+                'db_count': db_count,
+                'query_count': query_count,
+                'nodes': nodes_in_comm
+            })
+            
+            summary_lines.append(f"    Community {comm_id}: {len(nodes_in_comm)} nodes ({db_count} DB, {query_count} Q)")
+        
+        summary_lines.append("")
+        
+        # Sort communities by size
+        community_info.sort(key=lambda x: x['size'], reverse=True)
+        
+        # Save community assignments for this level
+        for comm_data in community_info:
+            comm_id = comm_data['id']
+            comm_dir = level_dir / f"community_{comm_id:03d}_size_{comm_data['size']}"
+            comm_dir.mkdir(exist_ok=True)
+            
+            # Get paths for this community
+            db_paths_in_comm = []
+            query_paths_in_comm = []
+            
+            for node in comm_data['nodes']:
+                if g.vs[node]['type'] == 'database':
+                    db_paths_in_comm.append(g.vs[node]['path'])
+                else:
+                    query_paths_in_comm.append(g.vs[node]['path'])
+            
+            # Save paths
+            if db_paths_in_comm:
+                with open(comm_dir / "database_paths.txt", 'w') as f:
+                    for path in db_paths_in_comm:
+                        f.write(f"{path}\n")
+            
+            if query_paths_in_comm:
+                with open(comm_dir / "query_paths.txt", 'w') as f:
+                    for path in query_paths_in_comm:
+                        f.write(f"{path}\n")
+            
+            # Create visualization for small communities
+            if comm_data['size'] <= 20:
+                create_component_visualization(db_paths_in_comm, query_paths_in_comm,
+                                             comm_id, comm_data['size'], comm_dir)
+        
+        # Create visualization for this resolution level
+        create_leiden_level_visualization(embeddings, community_labels, data_type_labels,
+                                        res, n_communities, modularity, level_dir)
+        
+        level_data.append({
+            'resolution': res,
+            'n_communities': n_communities,
+            'modularity': modularity,
+            'membership': community_labels
+        })
+    
+    # Write summary file
+    with open(summary_file, 'w') as f:
+        f.write('\n'.join(summary_lines))
+    
+    # Create comparison visualization across resolutions
+    create_leiden_hierarchy_visualization(embeddings, level_data, data_type_labels, output_dir)
+    
+    # Save graph structure in multiple formats
+    g.write_graphml(str(output_dir / "leiden_graph.graphml"))
+    
+    # Also create NetworkX graph for compatibility
+    G = nx.Graph()
+    for i in range(g.vcount()):
+        G.add_node(i, type=g.vs[i]['type'], path=g.vs[i]['path'])
+    for edge in g.es:
+        G.add_edge(edge.source, edge.target, weight=edge['weight'])
+    nx.write_gexf(G, output_dir / "leiden_graph.gexf")
+    
+    print(f"\nHierarchical Leiden community detection completed!")
+    print(f"Results saved in {output_dir}")
+    
+    return g, level_data
+
+
+def create_leiden_level_visualization(embeddings, community_labels, data_type_labels,
+                                    resolution, n_communities, modularity, output_dir):
+    """Create visualization for a single resolution level of Leiden algorithm."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # First subplot: t-SNE colored by community
+    # Use a colormap that can handle many communities
+    if n_communities <= 20:
+        colors = cm.tab20(np.linspace(0, 1, n_communities))
+    else:
+        colors = cm.gist_rainbow(np.linspace(0, 1, n_communities))
+    
+    for comm_id in range(n_communities):
+        mask = community_labels == comm_id
+        
+        # Separate database and query points
+        db_mask = mask & (data_type_labels == 0)
+        query_mask = mask & (data_type_labels == 1)
+        
+        # Plot database points
+        if np.any(db_mask):
+            ax1.scatter(embeddings[db_mask, 0], embeddings[db_mask, 1],
+                       c=[colors[comm_id]], s=50, alpha=0.6,
+                       edgecolors='none')
+        
+        # Plot query points
+        if np.any(query_mask):
+            ax1.scatter(embeddings[query_mask, 0], embeddings[query_mask, 1],
+                       c=[colors[comm_id]], s=100, alpha=0.8, marker='^',
+                       edgecolors='black', linewidths=1)
+    
+    ax1.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax1.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax1.set_title(f'Resolution {resolution}: {n_communities} Communities (Modularity: {modularity:.3f})', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    
+    # Add legend for database vs query
+    db_patch = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                         markersize=8, alpha=0.6, label='Database')
+    query_patch = plt.Line2D([0], [0], marker='^', color='w', markerfacecolor='gray',
+                            markersize=10, alpha=0.8, markeredgecolor='black', label='Query')
+    ax1.legend(handles=[db_patch, query_patch], loc='upper right')
+    
+    # Second subplot: Community size distribution
+    community_sizes = np.bincount(community_labels)
+    
+    # Separate counts for database and queries
+    db_counts = np.zeros(n_communities, dtype=int)
+    query_counts = np.zeros(n_communities, dtype=int)
+    
+    for comm_id in range(n_communities):
+        mask = community_labels == comm_id
+        db_counts[comm_id] = np.sum(mask & (data_type_labels == 0))
+        query_counts[comm_id] = np.sum(mask & (data_type_labels == 1))
+    
+    # Sort by total size
+    sorted_indices = np.argsort(community_sizes)[::-1]
+    
+    x = np.arange(min(n_communities, 30))  # Show max 30 communities
+    width = 0.35
+    
+    ax2.bar(x - width/2, db_counts[sorted_indices[:30]], width, label='Database', alpha=0.7, color='blue')
+    ax2.bar(x + width/2, query_counts[sorted_indices[:30]], width, label='Queries', alpha=0.7, color='red')
+    
+    ax2.set_xlabel('Community (sorted by size)', fontsize=12)
+    ax2.set_ylabel('Number of Images', fontsize=12)
+    ax2.set_title('Community Size Distribution (Top 30)', fontsize=14)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # Set x-axis labels
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([str(sorted_indices[i]) for i in range(min(n_communities, 30))], rotation=45)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / f"resolution_{resolution:.1f}_visualization.png", dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_leiden_hierarchy_visualization(embeddings, level_data, data_type_labels, output_dir):
+    """Create a comparison visualization across all resolution levels."""
+    n_levels = len(level_data)
+    
+    # Create grid layout
+    n_cols = 3
+    n_rows = (n_levels + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
+    if n_rows == 1:
+        axes = axes.reshape(1, -1)
+    if n_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for idx, level_info in enumerate(level_data):
+        row = idx // n_cols
+        col = idx % n_cols
+        ax = axes[row, col]
+        
+        # Get community assignments for this level
+        community_labels = level_info['membership']
+        n_communities = level_info['n_communities']
+        resolution = level_info['resolution']
+        
+        # Use appropriate colormap
+        if n_communities <= 20:
+            colors = cm.tab20(np.linspace(0, 1, n_communities))
+        else:
+            colors = cm.gist_rainbow(np.linspace(0, 1, n_communities))
+        
+        # Plot each community
+        for comm_id in range(n_communities):
+            mask = community_labels == comm_id
+            
+            # Plot all points in this community with the same color
+            if np.any(mask):
+                # Database points
+                db_mask = mask & (data_type_labels == 0)
+                if np.any(db_mask):
+                    ax.scatter(embeddings[db_mask, 0], embeddings[db_mask, 1],
+                              c=[colors[comm_id]], s=30, alpha=0.6, edgecolors='none')
+                
+                # Query points
+                query_mask = mask & (data_type_labels == 1)
+                if np.any(query_mask):
+                    ax.scatter(embeddings[query_mask, 0], embeddings[query_mask, 1],
+                              c=[colors[comm_id]], s=60, alpha=0.8, marker='^',
+                              edgecolors='black', linewidths=0.5)
+        
+        ax.set_title(f"Resolution {resolution}: {n_communities} communities\nModularity: {level_info['modularity']:.3f}",
+                    fontsize=10)
+        ax.set_xlabel('t-SNE 1', fontsize=8)
+        ax.set_ylabel('t-SNE 2', fontsize=8)
+        ax.grid(True, alpha=0.3)
+    
+    # Hide unused subplots
+    for idx in range(n_levels, n_rows * n_cols):
+        row = idx // n_cols
+        col = idx % n_cols
+        axes[row, col].set_visible(False)
+    
+    plt.suptitle('Hierarchical Leiden Community Detection - Different Resolutions', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output_dir / "leiden_hierarchy_comparison.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create resolution analysis plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    resolutions = [info['resolution'] for info in level_data]
+    modularities = [info['modularity'] for info in level_data]
+    n_communities_list = [info['n_communities'] for info in level_data]
+    
+    # Modularity vs resolution
+    ax1.plot(resolutions, modularities, 'o-', color='blue', linewidth=2, markersize=8)
+    ax1.set_xlabel('Resolution Parameter', fontsize=12)
+    ax1.set_ylabel('Modularity', fontsize=12)
+    ax1.set_title('Modularity vs Resolution', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xscale('log')
+    
+    # Number of communities vs resolution
+    ax2.plot(resolutions, n_communities_list, 's-', color='red', linewidth=2, markersize=8)
+    ax2.set_xlabel('Resolution Parameter', fontsize=12)
+    ax2.set_ylabel('Number of Communities', fontsize=12)
+    ax2.set_title('Community Count vs Resolution', fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xscale('log')
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / "leiden_resolution_analysis.png", dpi=300, bbox_inches='tight')
+    plt.close()
+
+
 def create_nn_graph_with_louvain(database_descriptors, queries_descriptors, 
                                  database_paths, queries_paths, output_dir,
                                  n_neighbors=2, resolution=1.0, perplexity=30, 
@@ -1585,15 +1968,16 @@ def create_louvain_level_visualization(embeddings, community_labels, data_type_l
         
         # Plot database points
         if np.any(db_mask):
-            ax1.scatter(embeddings[db_mask, 0], embeddings[db_mask, 1],
-                       c=[colors[comm_id]], s=50, alpha=0.6,
-                       edgecolors='none')
+            ax1.scatter(embeddings[db_mask, 0], embeddings[db_mask, 1], 
+                       c=[colors[comm_id]], alpha=0.6, s=50, 
+                       label=f'DB Cluster {comm_id}', edgecolors='none')
         
         # Plot query points
         query_mask = mask & (data_type_labels == 1)
         if np.any(query_mask):
-            ax1.scatter(embeddings[query_mask, 0], embeddings[query_mask, 1],
-                       c=[colors[comm_id]], s=100, alpha=0.8, marker='^',
+            ax1.scatter(embeddings[query_mask, 0], embeddings[query_mask, 1], 
+                       c=[colors[comm_id]], alpha=0.8, s=100, 
+                       marker='^', label=f'Query Cluster {comm_id}', 
                        edgecolors='black', linewidths=1)
     
     ax1.set_xlabel('t-SNE Component 1', fontsize=12)

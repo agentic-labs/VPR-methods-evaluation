@@ -11,4 +11,5 @@ torchvision
 tqdm
 hdbscan
 networkx
-python-louvain
+python-igraph
+leidenalg

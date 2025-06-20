@@ -166,15 +166,15 @@ def parse_arguments():
         help="number of nearest neighbors to connect in the graph (default: 1 for single nearest neighbor)",
     )
     parser.add_argument(
-        "--perform_louvain",
+        "--perform_leiden",
         action="store_true",
-        help="set to True if you want to perform Louvain community detection on the nearest neighbor graph",
+        help="set to True if you want to perform hierarchical Leiden community detection on the nearest neighbor graph",
     )
     parser.add_argument(
-        "--louvain_resolution",
-        type=float,
-        default=1.0,
-        help="resolution parameter for Louvain algorithm (higher = smaller communities, default: 1.0)",
+        "--leiden_iterations",
+        type=int,
+        default=2,
+        help="number of iterations for Leiden algorithm (default: 2)",
     )
     args = parser.parse_args()
 
