@@ -165,6 +165,17 @@ def parse_arguments():
         default=1,
         help="number of nearest neighbors to connect in the graph (default: 1 for single nearest neighbor)",
     )
+    parser.add_argument(
+        "--perform_louvain",
+        action="store_true",
+        help="set to True if you want to perform Louvain community detection on the nearest neighbor graph",
+    )
+    parser.add_argument(
+        "--louvain_resolution",
+        type=float,
+        default=1.0,
+        help="resolution parameter for Louvain algorithm (higher = smaller communities, default: 1.0)",
+    )
     args = parser.parse_args()
 
     args.use_labels = not args.no_labels

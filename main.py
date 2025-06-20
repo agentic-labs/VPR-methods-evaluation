@@ -325,6 +325,22 @@ def main(args):
         )
         logger.info(f"Connected components visualization saved in {cc_dir}")
 
+    # Perform Louvain community detection if requested
+    if args.perform_louvain:
+        logger.info(f"Performing Louvain community detection with {args.nn_graph_neighbors} neighbors and resolution={args.louvain_resolution}")
+        louvain_dir = log_dir / "louvain_communities"
+        graph, dendrogram, level_data = visualizations.create_nn_graph_with_louvain(
+            database_descriptors=database_descriptors if 'database_descriptors' in locals() else faiss_index.reconstruct_n(0, test_ds.num_database),
+            queries_descriptors=queries_descriptors,
+            database_paths=test_ds.database_paths,
+            queries_paths=test_ds.queries_paths,
+            output_dir=louvain_dir,
+            n_neighbors=args.nn_graph_neighbors,
+            resolution=args.louvain_resolution
+        )
+        logger.info(f"Louvain community detection results saved in {louvain_dir}")
+        logger.info(f"Found {len(level_data)} hierarchical levels with {level_data[-1]['n_communities']} communities at the top level")
+
     # Use a kNN to find predictions
     faiss_index = faiss.IndexFlatL2(args.descriptors_dimension)
     faiss_index.add(database_descriptors)

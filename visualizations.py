@@ -13,6 +13,7 @@ from scipy.cluster.hierarchy import dendrogram
 from scipy.spatial.distance import squareform
 import networkx as nx
 from collections import defaultdict
+import sys
 
 # Height and width of a single image for visualization
 IMG_HW = 512
@@ -1319,14 +1320,14 @@ def create_nn_graph_and_visualize_components(database_descriptors, queries_descr
         if np.any(db_mask):
             ax1.scatter(comp_embeddings[db_mask, 0], comp_embeddings[db_mask, 1],
                        c=[colors[comp_idx]], s=50, alpha=0.6,
-                       label=f'Comp {comp_idx} (DB)', edgecolors='none')
+                       edgecolors='none')
         
         # Plot query points
         query_mask = comp_types == 1
         if np.any(query_mask):
             ax1.scatter(comp_embeddings[query_mask, 0], comp_embeddings[query_mask, 1],
                        c=[colors[comp_idx]], s=100, alpha=0.8, marker='^',
-                       label=f'Comp {comp_idx} (Q)', edgecolors='black', linewidths=1)
+                       edgecolors='black', linewidths=1)
     
     # Plot remaining components in gray
     if len(components) > num_components_to_show:
@@ -1366,6 +1367,374 @@ def create_nn_graph_and_visualize_components(database_descriptors, queries_descr
     print(f"Graph structure saved to {output_dir / 'nearest_neighbor_graph.gexf'}")
     
     return G, components
+
+
+def create_nn_graph_with_louvain(database_descriptors, queries_descriptors, 
+                                 database_paths, queries_paths, output_dir,
+                                 n_neighbors=2, resolution=1.0, perplexity=30, 
+                                 n_iter=1000, random_state=42):
+    """Create a nearest neighbor graph and detect communities using Louvain algorithm.
+    
+    Parameters
+    ----------
+    database_descriptors : np.array of shape [num_database x descriptor_dim]
+    queries_descriptors : np.array of shape [num_queries x descriptor_dim]
+    database_paths : list of paths to database images
+    queries_paths : list of paths to query images
+    output_dir : Path, directory to save the community visualizations
+    n_neighbors : int, number of nearest neighbors to connect (default=2)
+    resolution : float, resolution parameter for Louvain (higher = smaller communities)
+    perplexity : float, t-SNE perplexity parameter
+    n_iter : int, number of iterations for t-SNE
+    random_state : int, random seed for reproducibility
+    """
+    try:
+        import community as community_louvain
+    except ImportError:
+        print("Installing python-louvain for community detection...")
+        import subprocess
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "python-louvain"])
+        import community as community_louvain
+    
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+    
+    # Combine all descriptors and paths
+    all_descriptors = np.vstack([database_descriptors, queries_descriptors])
+    all_paths = database_paths + queries_paths
+    num_database = len(database_descriptors)
+    
+    # Create labels (0 for database, 1 for queries)
+    data_type_labels = np.concatenate([
+        np.zeros(len(database_descriptors)),
+        np.ones(len(queries_descriptors))
+    ])
+    
+    print(f"Building nearest neighbor index for {len(all_descriptors)} descriptors...")
+    
+    # Build FAISS index for efficient NN search
+    dimension = all_descriptors.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(all_descriptors.astype(np.float32))
+    
+    # Find k+1 nearest neighbors (including self)
+    distances, neighbors = index.search(all_descriptors.astype(np.float32), n_neighbors + 1)
+    
+    # Create graph
+    G = nx.Graph()
+    
+    # Add nodes with attributes
+    for i in range(len(all_descriptors)):
+        node_type = 'database' if i < num_database else 'query'
+        G.add_node(i, type=node_type, path=all_paths[i])
+    
+    # Add edges with weights (using similarity = 1/distance)
+    for i in range(len(all_descriptors)):
+        for j in range(1, n_neighbors + 1):  # Skip j=0 which is self
+            neighbor_idx = neighbors[i, j]
+            if i != neighbor_idx:
+                # Use inverse distance as weight (similarity)
+                weight = 1.0 / (distances[i, j] + 1e-6)
+                G.add_edge(i, neighbor_idx, weight=weight)
+    
+    print(f"Created graph with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+    
+    # Detect communities using Louvain algorithm
+    print("Detecting communities using Louvain algorithm...")
+    
+    # Get dendrogram (hierarchical communities)
+    dendrogram = community_louvain.generate_dendrogram(G, weight='weight', resolution=resolution)
+    
+    # Create summary file
+    summary_file = output_dir / "louvain_communities_summary.txt"
+    summary_lines = []
+    summary_lines.append(f"Total nodes: {G.number_of_nodes()}")
+    summary_lines.append(f"Total edges: {G.number_of_edges()}")
+    summary_lines.append(f"Nearest neighbors used: {n_neighbors}")
+    summary_lines.append(f"Resolution parameter: {resolution}")
+    summary_lines.append(f"Number of hierarchical levels: {len(dendrogram)}")
+    summary_lines.append("")
+    
+    # Run t-SNE once for all visualizations
+    print("Computing t-SNE embedding...")
+    tsne = TSNE(n_components=2, perplexity=perplexity, n_iter=n_iter, 
+                random_state=random_state, verbose=1)
+    embeddings = tsne.fit_transform(all_descriptors)
+    
+    # Visualize communities at each level
+    level_data = []
+    for level in range(len(dendrogram)):
+        print(f"\nAnalyzing level {level}...")
+        partition = community_louvain.partition_at_level(dendrogram, level)
+        
+        # Convert partition dict to array
+        community_labels = np.array([partition[i] for i in range(len(all_descriptors))])
+        n_communities = len(set(community_labels))
+        
+        # Calculate modularity
+        modularity = community_louvain.modularity(partition, G, weight='weight')
+        
+        summary_lines.append(f"Level {level}:")
+        summary_lines.append(f"  Number of communities: {n_communities}")
+        summary_lines.append(f"  Modularity: {modularity:.4f}")
+        
+        # Create level directory
+        level_dir = output_dir / f"level_{level:02d}_communities_{n_communities}"
+        level_dir.mkdir(exist_ok=True)
+        
+        # Analyze each community
+        community_info = []
+        for comm_id in range(n_communities):
+            nodes_in_comm = np.where(community_labels == comm_id)[0]
+            db_count = sum(1 for node in nodes_in_comm if G.nodes[node]['type'] == 'database')
+            query_count = len(nodes_in_comm) - db_count
+            
+            community_info.append({
+                'id': comm_id,
+                'size': len(nodes_in_comm),
+                'db_count': db_count,
+                'query_count': query_count,
+                'nodes': nodes_in_comm
+            })
+            
+            summary_lines.append(f"    Community {comm_id}: {len(nodes_in_comm)} nodes ({db_count} DB, {query_count} Q)")
+        
+        summary_lines.append("")
+        
+        # Sort communities by size
+        community_info.sort(key=lambda x: x['size'], reverse=True)
+        
+        # Save community assignments for this level
+        for comm_data in community_info:
+            comm_id = comm_data['id']
+            comm_dir = level_dir / f"community_{comm_id:03d}_size_{comm_data['size']}"
+            comm_dir.mkdir(exist_ok=True)
+            
+            # Get paths for this community
+            db_paths_in_comm = []
+            query_paths_in_comm = []
+            
+            for node in comm_data['nodes']:
+                if G.nodes[node]['type'] == 'database':
+                    db_paths_in_comm.append(G.nodes[node]['path'])
+                else:
+                    query_paths_in_comm.append(G.nodes[node]['path'])
+            
+            # Save paths
+            if db_paths_in_comm:
+                with open(comm_dir / "database_paths.txt", 'w') as f:
+                    for path in db_paths_in_comm:
+                        f.write(f"{path}\n")
+            
+            if query_paths_in_comm:
+                with open(comm_dir / "query_paths.txt", 'w') as f:
+                    for path in query_paths_in_comm:
+                        f.write(f"{path}\n")
+            
+            # Create visualization for small communities
+            if comm_data['size'] <= 20:
+                create_component_visualization(db_paths_in_comm, query_paths_in_comm, 
+                                             comm_id, comm_data['size'], comm_dir)
+        
+        # Create visualization for this level
+        create_louvain_level_visualization(embeddings, community_labels, data_type_labels,
+                                         level, n_communities, modularity, level_dir)
+        
+        level_data.append({
+            'level': level,
+            'n_communities': n_communities,
+            'modularity': modularity,
+            'partition': partition
+        })
+    
+    # Write summary file
+    with open(summary_file, 'w') as f:
+        f.write('\n'.join(summary_lines))
+    
+    # Create comparison visualization across levels
+    create_louvain_hierarchy_visualization(embeddings, level_data, data_type_labels, output_dir)
+    
+    # Save graph structure
+    nx.write_gexf(G, output_dir / "louvain_graph.gexf")
+    print(f"Graph structure saved to {output_dir / 'louvain_graph.gexf'}")
+    
+    print(f"\nLouvain community detection completed!")
+    print(f"Results saved in {output_dir}")
+    
+    return G, dendrogram, level_data
+
+
+def create_louvain_level_visualization(embeddings, community_labels, data_type_labels,
+                                     level, n_communities, modularity, output_dir):
+    """Create visualization for a single level of Louvain hierarchy."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # First subplot: t-SNE colored by community
+    # Use a colormap that can handle many communities
+    if n_communities <= 20:
+        colors = cm.tab20(np.linspace(0, 1, n_communities))
+    else:
+        colors = cm.gist_rainbow(np.linspace(0, 1, n_communities))
+    
+    for comm_id in range(n_communities):
+        mask = community_labels == comm_id
+        
+        # Separate database and query points
+        db_mask = mask & (data_type_labels == 0)
+        query_mask = mask & (data_type_labels == 1)
+        
+        # Plot database points
+        if np.any(db_mask):
+            ax1.scatter(embeddings[db_mask, 0], embeddings[db_mask, 1],
+                       c=[colors[comm_id]], s=50, alpha=0.6,
+                       edgecolors='none')
+        
+        # Plot query points
+        query_mask = mask & (data_type_labels == 1)
+        if np.any(query_mask):
+            ax1.scatter(embeddings[query_mask, 0], embeddings[query_mask, 1],
+                       c=[colors[comm_id]], s=100, alpha=0.8, marker='^',
+                       edgecolors='black', linewidths=1)
+    
+    ax1.set_xlabel('t-SNE Component 1', fontsize=12)
+    ax1.set_ylabel('t-SNE Component 2', fontsize=12)
+    ax1.set_title(f'Level {level}: {n_communities} Communities (Modularity: {modularity:.3f})', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    
+    # Add legend for database vs query
+    db_patch = plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                         markersize=8, alpha=0.6, label='Database')
+    query_patch = plt.Line2D([0], [0], marker='^', color='w', markerfacecolor='gray',
+                            markersize=10, alpha=0.8, markeredgecolor='black', label='Query')
+    ax1.legend(handles=[db_patch, query_patch], loc='upper right')
+    
+    # Second subplot: Community size distribution
+    community_sizes = np.bincount(community_labels)
+    
+    # Separate counts for database and queries
+    db_counts = np.zeros(n_communities, dtype=int)
+    query_counts = np.zeros(n_communities, dtype=int)
+    
+    for comm_id in range(n_communities):
+        mask = community_labels == comm_id
+        db_counts[comm_id] = np.sum(mask & (data_type_labels == 0))
+        query_counts[comm_id] = np.sum(mask & (data_type_labels == 1))
+    
+    # Sort by total size
+    sorted_indices = np.argsort(community_sizes)[::-1]
+    
+    x = np.arange(n_communities)
+    width = 0.35
+    
+    ax2.bar(x - width/2, db_counts[sorted_indices], width, label='Database', alpha=0.7, color='blue')
+    ax2.bar(x + width/2, query_counts[sorted_indices], width, label='Queries', alpha=0.7, color='red')
+    
+    ax2.set_xlabel('Community (sorted by size)', fontsize=12)
+    ax2.set_ylabel('Number of Images', fontsize=12)
+    ax2.set_title('Community Size Distribution', fontsize=14)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # Only show labels for first few communities
+    if n_communities > 20:
+        ax2.set_xticks(x[:20])
+        ax2.set_xticklabels([str(sorted_indices[i]) for i in range(20)])
+    else:
+        ax2.set_xticks(x)
+        ax2.set_xticklabels([str(sorted_indices[i]) for i in range(n_communities)])
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / f"level_{level:02d}_visualization.png", dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def create_louvain_hierarchy_visualization(embeddings, level_data, data_type_labels, output_dir):
+    """Create a comparison visualization across all hierarchy levels."""
+    n_levels = len(level_data)
+    
+    if n_levels <= 4:
+        fig, axes = plt.subplots(1, n_levels, figsize=(6*n_levels, 5))
+        if n_levels == 1:
+            axes = [axes]
+    else:
+        n_rows = (n_levels + 3) // 4
+        fig, axes = plt.subplots(n_rows, 4, figsize=(24, 5*n_rows))
+        axes = axes.flatten()
+    
+    for idx, level_info in enumerate(level_data):
+        ax = axes[idx]
+        
+        # Get partition for this level
+        partition = level_info['partition']
+        community_labels = np.array([partition[i] for i in range(len(embeddings))])
+        n_communities = level_info['n_communities']
+        
+        # Use appropriate colormap
+        if n_communities <= 20:
+            colors = cm.tab20(np.linspace(0, 1, n_communities))
+        else:
+            colors = cm.gist_rainbow(np.linspace(0, 1, n_communities))
+        
+        # Plot each community
+        for comm_id in range(n_communities):
+            mask = community_labels == comm_id
+            
+            # Plot all points in this community with the same color
+            if np.any(mask):
+                # Database points
+                db_mask = mask & (data_type_labels == 0)
+                if np.any(db_mask):
+                    ax.scatter(embeddings[db_mask, 0], embeddings[db_mask, 1],
+                              c=[colors[comm_id]], s=30, alpha=0.6, edgecolors='none')
+                
+                # Query points
+                query_mask = mask & (data_type_labels == 1)
+                if np.any(query_mask):
+                    ax.scatter(embeddings[query_mask, 0], embeddings[query_mask, 1],
+                              c=[colors[comm_id]], s=60, alpha=0.8, marker='^',
+                              edgecolors='black', linewidths=0.5)
+        
+        ax.set_title(f"Level {idx}: {n_communities} communities\nModularity: {level_info['modularity']:.3f}",
+                    fontsize=10)
+        ax.set_xlabel('t-SNE 1', fontsize=8)
+        ax.set_ylabel('t-SNE 2', fontsize=8)
+        ax.grid(True, alpha=0.3)
+    
+    # Hide unused subplots if any
+    if n_levels > 1 and n_levels % 4 != 0:
+        for idx in range(n_levels, len(axes)):
+            axes[idx].set_visible(False)
+    
+    plt.suptitle('Louvain Community Detection - Hierarchy Levels', fontsize=14)
+    plt.tight_layout()
+    plt.savefig(output_dir / "louvain_hierarchy_comparison.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Create modularity plot
+    plt.figure(figsize=(10, 6))
+    levels = [info['level'] for info in level_data]
+    modularities = [info['modularity'] for info in level_data]
+    n_communities_list = [info['n_communities'] for info in level_data]
+    
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    color = 'tab:blue'
+    ax1.set_xlabel('Hierarchy Level', fontsize=12)
+    ax1.set_ylabel('Modularity', color=color, fontsize=12)
+    ax1.plot(levels, modularities, 'o-', color=color, linewidth=2, markersize=8)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, alpha=0.3)
+    
+    ax2 = ax1.twinx()
+    color = 'tab:red'
+    ax2.set_ylabel('Number of Communities', color=color, fontsize=12)
+    ax2.plot(levels, n_communities_list, 's-', color=color, linewidth=2, markersize=8)
+    ax2.tick_params(axis='y', labelcolor=color)
+    
+    plt.title('Modularity and Community Count by Hierarchy Level', fontsize=14)
+    fig.tight_layout()
+    plt.savefig(output_dir / "louvain_modularity_plot.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def create_component_visualization(db_paths, query_paths, comp_idx, comp_size, output_dir):

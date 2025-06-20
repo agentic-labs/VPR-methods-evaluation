@@ -11,3 +11,4 @@ torchvision
 tqdm
 hdbscan
 networkx
+python-louvain
