@@ -506,7 +506,7 @@ def save_images_by_cluster(database_paths, queries_paths, cluster_labels_db,
 
 
 def create_cluster_visualization(database_paths, queries_paths, db_indices, 
-                                query_indices, cluster_id, cluster_dir, max_images=10):
+                                query_indices, cluster_id, cluster_dir, max_images=None):
     """Create a visualization showing sample images from a cluster.
     
     Parameters
@@ -517,11 +517,15 @@ def create_cluster_visualization(database_paths, queries_paths, db_indices,
     query_indices : indices of query images in this cluster
     cluster_id : int, cluster identifier
     cluster_dir : Path, directory for this cluster
-    max_images : int, maximum number of images to show per category
+    max_images : int or None, maximum number of images to show per category. If None, show all images.
     """
-    # Limit the number of images to visualize
-    db_sample = db_indices[:max_images]
-    query_sample = query_indices[:max_images]
+    # Use all images if max_images is None
+    if max_images is None:
+        db_sample = db_indices
+        query_sample = query_indices
+    else:
+        db_sample = db_indices[:max_images]
+        query_sample = query_indices[:max_images]
     
     # Calculate grid dimensions
     n_db = len(db_sample)
@@ -530,25 +534,48 @@ def create_cluster_visualization(database_paths, queries_paths, db_indices,
     if n_db == 0 and n_query == 0:
         return
     
+    # Adaptive grid sizing based on number of images
+    total_images = n_db + n_query
+    if total_images <= 10:
+        img_size = 256
+        max_cols = 5
+    elif total_images <= 50:
+        img_size = 150
+        max_cols = 10
+    elif total_images <= 100:
+        img_size = 100
+        max_cols = 15
+    else:
+        img_size = 75
+        max_cols = 20
+    
+    # Calculate grid dimensions
+    n_cols = min(max_cols, max(n_db, n_query))
+    n_rows = 2  # One row for database, one for queries
+    
     # Create the visualization
-    fig_width = 15
-    fig_height = 6
-    fig, axes = plt.subplots(2, max(n_db, n_query), figsize=(fig_width, fig_height))
+    fig_width = min(30, n_cols * (img_size / 100))  # Scale figure width
+    fig_height = n_rows * (img_size / 100) + 1  # Scale figure height
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
     
     # Handle case where axes is 1D
-    if max(n_db, n_query) == 1:
+    if n_cols == 1:
         axes = axes.reshape(-1, 1)
+    elif n_rows == 1:
+        axes = axes.reshape(1, -1)
     
     # Display database images
-    for i in range(max(n_db, n_query)):
+    for i in range(n_cols):
         # Database row
         if i < n_db:
             img_path = database_paths[db_sample[i]]
-            img = Image.open(img_path).convert('RGB')
-            # Use Resize with only size parameter to avoid the max_size conflict
-            img_resized = tfm.Resize((256, 256), antialias=True)(img)
-            axes[0, i].imshow(img_resized)
-            axes[0, i].set_title(f'DB {db_sample[i]}', fontsize=8)
+            try:
+                img = Image.open(img_path).convert('RGB')
+                img_resized = tfm.Resize((img_size, img_size), antialias=True)(img)
+                axes[0, i].imshow(img_resized)
+                axes[0, i].set_title(f'DB {db_sample[i]}', fontsize=max(6, 8 * (100 / img_size)))
+            except Exception as e:
+                axes[0, i].text(0.5, 0.5, 'Error', ha='center', va='center', transform=axes[0, i].transAxes)
         else:
             axes[0, i].axis('off')
         axes[0, i].set_xticks([])
@@ -557,11 +584,13 @@ def create_cluster_visualization(database_paths, queries_paths, db_indices,
         # Query row
         if i < n_query:
             img_path = queries_paths[query_sample[i]]
-            img = Image.open(img_path).convert('RGB')
-            # Use Resize with only size parameter to avoid the max_size conflict
-            img_resized = tfm.Resize((256, 256), antialias=True)(img)
-            axes[1, i].imshow(img_resized)
-            axes[1, i].set_title(f'Query {query_sample[i]}', fontsize=8)
+            try:
+                img = Image.open(img_path).convert('RGB')
+                img_resized = tfm.Resize((img_size, img_size), antialias=True)(img)
+                axes[1, i].imshow(img_resized)
+                axes[1, i].set_title(f'Q {query_sample[i]}', fontsize=max(6, 8 * (100 / img_size)))
+            except Exception as e:
+                axes[1, i].text(0.5, 0.5, 'Error', ha='center', va='center', transform=axes[1, i].transAxes)
         else:
             axes[1, i].axis('off')
         axes[1, i].set_xticks([])
@@ -573,12 +602,12 @@ def create_cluster_visualization(database_paths, queries_paths, db_indices,
     if n_query > 0:
         axes[1, 0].set_ylabel('Queries', fontsize=10, rotation=90, va='center')
     
-    plt.suptitle(f'Cluster {cluster_id} Sample Images\n(DB: {len(db_indices)} images, Queries: {len(query_indices)} images)', 
+    plt.suptitle(f'Cluster {cluster_id} Images\n(DB: {len(db_indices)} images, Queries: {len(query_indices)} images)', 
                  fontsize=12)
     plt.tight_layout()
     
     # Save the visualization
-    viz_path = cluster_dir / f'cluster_{cluster_id}_samples.jpg'
+    viz_path = cluster_dir / f'cluster_{cluster_id}_grid.jpg'
     plt.savefig(viz_path, dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -1278,10 +1307,9 @@ def create_nn_graph_and_visualize_components(database_descriptors, queries_descr
                 for path in query_paths_in_comp:
                     f.write(f"{path}\n")
         
-        # Create visualization for small components
-        if comp_size <= 20:  # Visualize components with 20 or fewer images
-            create_component_visualization(db_paths_in_comp, query_paths_in_comp, 
-                                         comp_idx, comp_size, comp_dir)
+        # Create visualization for all components
+        create_component_visualization(db_paths_in_comp, query_paths_in_comp, 
+                                     comp_idx, comp_size, comp_dir)
         
         summary_lines.append("")
     
@@ -1540,10 +1568,9 @@ def create_nn_graph_with_leiden(database_descriptors, queries_descriptors,
                     for path in query_paths_in_comm:
                         f.write(f"{path}\n")
             
-            # Create visualization for small communities
-            if comm_data['size'] <= 20:
-                create_component_visualization(db_paths_in_comm, query_paths_in_comm,
-                                             comm_id, comm_data['size'], comm_dir)
+            # Create visualization for all communities
+            create_component_visualization(db_paths_in_comm, query_paths_in_comm,
+                                         comm_id, comm_data['size'], comm_dir)
         
         # Create visualization for this resolution level
         create_leiden_level_visualization(embeddings, community_labels, data_type_labels,
@@ -1914,10 +1941,9 @@ def create_nn_graph_with_louvain(database_descriptors, queries_descriptors,
                     for path in query_paths_in_comm:
                         f.write(f"{path}\n")
             
-            # Create visualization for small communities
-            if comm_data['size'] <= 20:
-                create_component_visualization(db_paths_in_comm, query_paths_in_comm, 
-                                             comm_id, comm_data['size'], comm_dir)
+            # Create visualization for all communities
+            create_component_visualization(db_paths_in_comm, query_paths_in_comm, 
+                                         comm_id, comm_data['size'], comm_dir)
         
         # Create visualization for this level
         create_louvain_level_visualization(embeddings, community_labels, data_type_labels,
@@ -2132,16 +2158,44 @@ def create_component_visualization(db_paths, query_paths, comp_idx, comp_size, o
     
     # Calculate grid dimensions
     n_images = len(all_paths)
-    grid_cols = min(5, n_images)  # Max 5 columns
+    
+    # Adaptive image size and grid columns based on total number of images
+    if n_images <= 10:
+        img_size = 200
+        grid_cols = min(5, n_images)
+    elif n_images <= 25:
+        img_size = 150
+        grid_cols = 5
+    elif n_images <= 50:
+        img_size = 120
+        grid_cols = 8
+    elif n_images <= 100:
+        img_size = 100
+        grid_cols = 10
+    else:
+        img_size = 80
+        grid_cols = 12
+    
     grid_rows = math.ceil(n_images / grid_cols)
     
     # Image dimensions
-    img_size = 200
-    padding = 10
+    padding = max(5, int(img_size * 0.05))  # Adaptive padding
     
     # Create canvas
     canvas_width = grid_cols * img_size + (grid_cols + 1) * padding
     canvas_height = grid_rows * img_size + (grid_rows + 1) * padding + 50  # Extra space for title
+    
+    # Limit canvas size for very large grids
+    max_canvas_width = 3000
+    max_canvas_height = 3000
+    
+    if canvas_width > max_canvas_width or canvas_height > max_canvas_height:
+        # Scale down if too large
+        scale_factor = min(max_canvas_width / canvas_width, max_canvas_height / canvas_height)
+        img_size = int(img_size * scale_factor)
+        padding = int(padding * scale_factor)
+        canvas_width = grid_cols * img_size + (grid_cols + 1) * padding
+        canvas_height = grid_rows * img_size + (grid_rows + 1) * padding + 50
     
     canvas = Image.new('RGB', (canvas_width, canvas_height), 'white')
     draw = ImageDraw.Draw(canvas)
@@ -2149,7 +2203,8 @@ def create_component_visualization(db_paths, query_paths, comp_idx, comp_size, o
     # Add title
     title = f"Component {comp_idx} - Size: {comp_size} (DB: {len(db_paths)}, Q: {len(query_paths)})"
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        font_size = max(12, min(20, int(canvas_width / 40)))
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size)
     except:
         font = None
     
@@ -2172,6 +2227,7 @@ def create_component_visualization(db_paths, query_paths, comp_idx, comp_size, o
             # Add border color based on type
             is_query = path in query_paths
             border_color = (255, 0, 0) if is_query else (0, 0, 255)  # Red for query, blue for database
+            border_width = max(2, int(img_size * 0.02))  # Adaptive border width
             
             # Create bordered image
             bordered = Image.new('RGB', (img_size, img_size), border_color)
@@ -2181,19 +2237,37 @@ def create_component_visualization(db_paths, query_paths, comp_idx, comp_size, o
             
             # Draw border
             draw_border = ImageDraw.Draw(bordered)
-            draw_border.rectangle([0, 0, img_size-1, img_size-1], outline=border_color, width=3)
+            draw_border.rectangle([0, 0, img_size-1, img_size-1], outline=border_color, width=border_width)
             
             canvas.paste(bordered, (x, y))
             
-            # Add label
-            label = "Q" if is_query else "DB"
-            draw.text((x + 5, y + 5), label, fill='white', font=font)
+            # Add label for smaller grids
+            if n_images <= 50:
+                label = "Q" if is_query else "DB"
+                label_font_size = max(10, int(img_size * 0.15))
+                try:
+                    label_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", label_font_size)
+                except:
+                    label_font = None
+                draw.text((x + 5, y + 5), label, fill='white', font=label_font)
             
         except Exception as e:
             print(f"Error loading image {path}: {e}")
             # Draw placeholder
             draw.rectangle([x, y, x + img_size, y + img_size], fill='lightgray')
             draw.text((x + img_size//2 - 20, y + img_size//2), "Error", fill='red')
+    
+    # Add legend for large grids
+    if n_images > 50:
+        legend_y = canvas_height - 30
+        legend_x = 10
+        # Database legend
+        draw.rectangle([legend_x, legend_y, legend_x + 15, legend_y + 15], fill=(0, 0, 255))
+        draw.text((legend_x + 20, legend_y), "Database", fill='black', font=font)
+        # Query legend
+        legend_x += 100
+        draw.rectangle([legend_x, legend_y, legend_x + 15, legend_y + 15], fill=(255, 0, 0))
+        draw.text((legend_x + 20, legend_y), "Query", fill='black', font=font)
     
     # Save visualization
     canvas.save(output_dir / f"component_{comp_idx:03d}_visualization.jpg", quality=85)
