@@ -1036,7 +1036,7 @@ def save_hierarchical_images_by_cluster(database_paths, queries_paths, cluster_l
 
 
 def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors, save_path, 
-                                      perplexity=30, n_iter=1000, random_state=42):
+                                      n_neighbors=2, perplexity=30, n_iter=1000, random_state=42):
     """Create a t-SNE visualization showing nearest neighbor connections for all points.
     
     Parameters
@@ -1044,6 +1044,7 @@ def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors,
     database_descriptors : np.array of shape [num_database x descriptor_dim]
     queries_descriptors : np.array of shape [num_queries x descriptor_dim]
     save_path : Path or str, where to save the plot
+    n_neighbors : int, number of nearest neighbors to connect (default: 2)
     perplexity : float, t-SNE perplexity parameter
     n_iter : int, number of iterations for t-SNE
     random_state : int, random seed for reproducibility
@@ -1064,16 +1065,16 @@ def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors,
                 random_state=random_state, verbose=1)
     embeddings = tsne.fit_transform(all_descriptors)
     
-    print("Finding nearest neighbors in descriptor space...")
+    print(f"Finding {n_neighbors} nearest neighbors in descriptor space...")
     
     # Find nearest neighbors in the original descriptor space
     # Using FAISS for efficient nearest neighbor search
     faiss_index = faiss.IndexFlatL2(all_descriptors.shape[1])
     faiss_index.add(all_descriptors.astype(np.float32))
     
-    # Search for 2 nearest neighbors (first one is the point itself)
-    distances, neighbors = faiss_index.search(all_descriptors.astype(np.float32), 2)
-    nearest_neighbors = neighbors[:, 1]  # Get the second column (first actual neighbor)
+    # Search for n_neighbors + 1 nearest neighbors (first one is the point itself)
+    distances, neighbors = faiss_index.search(all_descriptors.astype(np.float32), n_neighbors + 1)
+    nearest_neighbors = neighbors[:, 1:n_neighbors+1]  # Skip the first column (self)
     
     # Create the plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(24, 10))
@@ -1100,28 +1101,32 @@ def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors,
                 c='red', alpha=0.6, s=80, label='Queries', edgecolors='black', linewidths=1)
     
     # Draw connections to nearest neighbors
-    print("Drawing nearest neighbor connections...")
+    print(f"Drawing connections to {n_neighbors} nearest neighbors...")
     for i in range(len(embeddings)):
-        nn_idx = nearest_neighbors[i]
-        
-        # Determine color based on point types
-        if labels[i] == 0 and labels[nn_idx] == 0:  # DB to DB
-            color = 'blue'
-            alpha = 0.2
-        elif labels[i] == 1 and labels[nn_idx] == 1:  # Query to Query
-            color = 'red'
-            alpha = 0.3
-        else:  # Cross-type connection (DB to Query or Query to DB)
-            color = 'green'
-            alpha = 0.4
-        
-        ax2.plot([embeddings[i, 0], embeddings[nn_idx, 0]], 
-                [embeddings[i, 1], embeddings[nn_idx, 1]], 
-                color=color, alpha=alpha, linewidth=0.5)
+        for neighbor_rank in range(n_neighbors):
+            nn_idx = nearest_neighbors[i, neighbor_rank]
+            
+            # Determine color based on point types
+            if labels[i] == 0 and labels[nn_idx] == 0:  # DB to DB
+                color = 'blue'
+                alpha = 0.2 * (1 - neighbor_rank / n_neighbors)  # Fade for further neighbors
+            elif labels[i] == 1 and labels[nn_idx] == 1:  # Query to Query
+                color = 'red'
+                alpha = 0.3 * (1 - neighbor_rank / n_neighbors)
+            else:  # Cross-type connection (DB to Query or Query to DB)
+                color = 'green'
+                alpha = 0.4 * (1 - neighbor_rank / n_neighbors)
+            
+            # Make lines thinner for further neighbors
+            linewidth = 0.5 * (1 - neighbor_rank / (n_neighbors + 1))
+            
+            ax2.plot([embeddings[i, 0], embeddings[nn_idx, 0]], 
+                    [embeddings[i, 1], embeddings[nn_idx, 1]], 
+                    color=color, alpha=alpha, linewidth=linewidth)
     
     ax2.set_xlabel('t-SNE Component 1', fontsize=12)
     ax2.set_ylabel('t-SNE Component 2', fontsize=12)
-    ax2.set_title('t-SNE with Nearest Neighbor Connections', fontsize=14)
+    ax2.set_title(f't-SNE with {n_neighbors} Nearest Neighbor Connections', fontsize=14)
     ax2.legend(fontsize=12)
     ax2.grid(True, alpha=0.3)
     
@@ -1140,7 +1145,7 @@ def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors,
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"t-SNE with all nearest neighbor connections saved to {save_path}")
+    print(f"t-SNE with {n_neighbors} nearest neighbor connections saved to {save_path}")
     
     # Save embeddings and nearest neighbor information
     embeddings_path = Path(save_path).parent / "tsne_nn_embeddings.npz"
@@ -1150,5 +1155,5 @@ def plot_tsne_with_all_nn_connections(database_descriptors, queries_descriptors,
              db_embeddings=db_embeddings,
              query_embeddings=query_embeddings,
              nearest_neighbors=nearest_neighbors,
-             distances=distances[:, 1])  # Save distances to nearest neighbors
+             distances=distances[:, 1:n_neighbors+1])  # Save distances to nearest neighbors
     print(f"t-SNE embeddings and NN info saved to {embeddings_path}")
